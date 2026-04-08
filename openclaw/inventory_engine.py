@@ -524,21 +524,26 @@ def apply_inventory_logic(
     # -----------------------------------------------------
     df["Available"] = df["Qty on hand"] - df["Qty Allocated"]
     df["Target Stock"] = df["Demand_Per_Month_Used"] * months_target
-    df["Recommended Order"] = np.ceil(df["Target Stock"] - df["Available"]).clip(lower=0)
+
+    # CHANGED: keep the raw recommendation first
+    df["Base Recommended Order"] = np.ceil(df["Target Stock"] - df["Available"]).clip(lower=0)
 
     if use_eoq_rounding:
         valid_eoq = df["EOQ"] > 1
-        df["Recommended Order"] = np.where(
-            valid_eoq & (df["Recommended Order"] > 0),
-            np.ceil(df["Recommended Order"] / df["EOQ"]) * df["EOQ"],
-            df["Recommended Order"]
+        df["Base Recommended Order"] = np.where(
+            valid_eoq & (df["Base Recommended Order"] > 0),
+            np.ceil(df["Base Recommended Order"] / df["EOQ"]) * df["EOQ"],
+            df["Base Recommended Order"]
         )
 
-    df["Recommended Order"] = (
-        pd.to_numeric(df["Recommended Order"], errors="coerce")
+    df["Base Recommended Order"] = (
+        pd.to_numeric(df["Base Recommended Order"], errors="coerce")
         .fillna(0)
         .astype(int)
     )
+
+    # CHANGED: final output order qty
+    df["Recommended Order"] = df["Base Recommended Order"]
 
     # Use actual Min where available, otherwise default to 5.
     df["Effective Min"] = np.where(
@@ -550,10 +555,6 @@ def apply_inventory_logic(
     # -----------------------------------------------------
     # PRIORITY LOGIC
     # -----------------------------------------------------
-    # This matches the current app logic:
-    # - URGENT if Net After POs < 0
-    # - REPLENISH if Net After POs >= 0 but below Effective Min
-    # - OK otherwise
     df["Priority V2"] = "🟢 OK"
     df.loc[df["Net After POs"] < 0, "Priority V2"] = "🔴 URGENT"
     df.loc[
@@ -561,6 +562,49 @@ def apply_inventory_logic(
         (df["Net After POs"] < df["Effective Min"]),
         "Priority V2"
     ] = "🟡 REPLENISH"
+
+    # -----------------------------------------------------
+    # CHANGED: ORDER DECISION LOGIC
+    # -----------------------------------------------------
+    forecast_zero = df["Forecast Average"].fillna(0) <= 0
+    demand_zero = df["Demand_Per_Month_Used"].fillna(0) <= 0
+    zero_demand = forecast_zero & demand_zero
+
+    has_positive_demand = df["Demand_Per_Month_Used"].fillna(0) > 0
+    below_target_after_pos = df["Net After POs"].fillna(0) < df["Target Stock"].fillna(0)
+    po_covers_target = df["Net After POs"].fillna(0) >= df["Target Stock"].fillna(0)
+    po_covers_shortage = df["Qty on Order"].fillna(0) >= (-df["Available"].clip(upper=0))
+
+    df["Order Decision"] = "REVIEW"
+    df["Decision Reason"] = "Manual review required"
+
+    mask_order = has_positive_demand & below_target_after_pos & (df["Base Recommended Order"] > 0)
+    df.loc[mask_order, "Order Decision"] = "ORDER"
+    df.loc[mask_order, "Decision Reason"] = "Positive forecast and below target"
+
+    mask_po_covers_target = po_covers_target
+    df.loc[mask_po_covers_target, "Order Decision"] = "DO NOT ORDER"
+    df.loc[mask_po_covers_target, "Decision Reason"] = "On order already covers target"
+
+    mask_zero_demand_clear = zero_demand & (df["Net After POs"].fillna(0) >= 0)
+    df.loc[mask_zero_demand_clear, "Order Decision"] = "DO NOT ORDER"
+    df.loc[mask_zero_demand_clear, "Decision Reason"] = "Zero forecast and zero recent usage"
+
+    mask_zero_demand_negative = zero_demand & (df["Available"].fillna(0) < 0)
+    df.loc[mask_zero_demand_negative, "Order Decision"] = "REVIEW"
+    df.loc[mask_zero_demand_negative, "Decision Reason"] = "Negative stock but no forecast demand"
+
+    mask_po_covers_shortage = zero_demand & (df["Available"].fillna(0) < 0) & po_covers_shortage
+    df.loc[mask_po_covers_shortage, "Order Decision"] = "DO NOT ORDER"
+    df.loc[mask_po_covers_shortage, "Decision Reason"] = "On order already covers shortage"
+
+    # Final recommended order only stays on true ORDER rows
+    df.loc[df["Order Decision"] != "ORDER", "Recommended Order"] = 0
+    df["Recommended Order"] = (
+        pd.to_numeric(df["Recommended Order"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
 
     # Default API behaviour if priorities were not provided.
     if selected_priorities is None:
@@ -606,6 +650,8 @@ def apply_inventory_logic(
     # -----------------------------------------------------
     sort_options = [
         "Recommended Order",
+        "Base Recommended Order",
+        "Order Decision",
         "Qty Allocated",
         "Target Stock",
         "Demand_Per_Month_Used",
@@ -807,7 +853,10 @@ def explain_part_decision(
         "Forecast_Average": details.get("Forecast Average"),
         "Forecast_Months_Used": details.get("Forecast Months Used"),
         "Target_Stock": details.get("Target Stock"),
+        "Base_Recommended_Order": details.get("Base Recommended Order"),
         "Recommended_Order": details.get("Recommended Order"),
+        "Order_Decision": details.get("Order Decision"),
+        "Decision_Reason": details.get("Decision Reason"),
         "EOQ": details.get("EOQ"),
         "Priority_V2": details.get("Priority V2"),
         "Forecast_Matched": details.get("Forecast Matched?"),
