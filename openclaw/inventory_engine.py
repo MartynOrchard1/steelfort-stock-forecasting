@@ -56,6 +56,21 @@ def normalize_part_number(series: pd.Series) -> pd.Series:
     )
 
 
+def get_forecast_month_columns_newest_first(columns) -> list[str]:
+    """
+    Return forecast month columns in newest-to-oldest order.
+
+    IMPORTANT:
+    The forecasting export headers were reversed by IT setup, so:
+    - ith_24 = most recent month
+    - ith_23 = next most recent
+    - ...
+    - ith_01 = oldest month
+    """
+    month_cols = [c for c in columns if re.fullmatch(r"ith_\d{2}", str(c))]
+    return sorted(month_cols, key=lambda x: int(str(x).split("_")[1]), reverse=True)
+
+
 # =========================================================
 # FILE LOADERS
 # =========================================================
@@ -79,6 +94,23 @@ def load_file_from_bytes(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     """
     file_name = file_name.lower()
 
+    header_markers = {
+        "POREF_PART",
+        "Part_Number",
+        "ITMAS_PART",
+        "Part",
+        "PART",
+        "Type",
+        "TYPE",
+        "ith_part",
+        "part_number",
+        "Part #",
+        "Steelfort Sku",
+        "SKU",
+        "Bunnings Item Number",
+        "Item Description",
+    }
+
     # -----------------------------------------------------
     # CSV LOADING
     # -----------------------------------------------------
@@ -87,10 +119,6 @@ def load_file_from_bytes(file_bytes: bytes, file_name: str) -> pd.DataFrame:
         rows = list(csv.reader(io.StringIO(text)))
 
         header_index = None
-        header_markers = {
-            "POREF_PART", "Part_Number", "ITMAS_PART", "Part", "PART",
-            "Type", "TYPE", "ith_part"
-        }
 
         for i, row in enumerate(rows):
             cleaned = [str(cell).replace("\n", " ").strip() for cell in row]
@@ -127,12 +155,8 @@ def load_file_from_bytes(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     df = pd.read_excel(excel_buffer, header=None)
 
     header_index = None
-    header_markers = {
-        "POREF_PART", "Part_Number", "ITMAS_PART", "Part", "PART",
-        "Type", "TYPE", "ith_part"
-    }
-
     max_scan = min(30, len(df))
+
     for i in range(max_scan):
         row_values = [str(x).replace("\n", " ").strip() for x in df.iloc[i].tolist()]
         if any(val in header_markers for val in row_values):
@@ -186,6 +210,8 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
         "ITMAS_PART": "Part_Number",
         "PART": "Part_Number",
         "Part": "Part_Number",
+        "Part #": "Part_Number",
+        "part_number": "Part_Number",
         "ITMAS_NAME": "Description",
         "NAME": "Description",
         "Name": "Description",
@@ -239,11 +265,21 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     df["Loc"] = df["Loc"].astype(str).replace("nan", "")
     df["Status"] = df["Status"].astype(str).replace("nan", "")
 
+    # Any description containing NLA should be treated as no longer available.
     df["Is NLA?"] = df["Description"].str.upper().str.contains("NLA", na=False)
 
     numeric_cols = [
-        "Qty on hand", "Qty Allocated", "Qty Available", "Qty on Order",
-        "Min", "Max", "6mAvg", "6mUsage", "12mAvg", "12mUsage", "EOQ"
+        "Qty on hand",
+        "Qty Allocated",
+        "Qty Available",
+        "Qty on Order",
+        "Min",
+        "Max",
+        "6mAvg",
+        "6mUsage",
+        "12mAvg",
+        "12mUsage",
+        "EOQ",
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -253,12 +289,14 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
         errors="coerce"
     )
 
+    # Core stock position fields.
     df["Available Now"] = df["Qty on hand"] - df["Qty Allocated"]
     df["Net After POs"] = df["Qty on hand"] + df["Qty on Order"] - df["Qty Allocated"]
     df["Shortage to Min"] = (df["Min"] - df["Net After POs"]).clip(lower=0)
     df["Shortage to Max"] = (df["Max"] - df["Net After POs"]).clip(lower=0)
     df["Below Min?"] = df["Net After POs"] < df["Min"]
 
+    # Original priority field retained for compatibility.
     df["Priority"] = "OK"
     df.loc[(df["Min"] > 0) & (df["Below Min?"]), "Priority"] = "Review"
     df.loc[(df["Min"] > 0) & (df["Below Min?"]) & (df["Qty Allocated"] > 0), "Priority"] = "High"
@@ -268,6 +306,9 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
 
 
 def clean_inventory_data_from_path(file_path: str | Path) -> pd.DataFrame:
+    """
+    Convenience wrapper for loading inventory data directly from file path.
+    """
     file_bytes, file_name = read_file_bytes(file_path)
     return clean_inventory_data(file_bytes, file_name)
 
@@ -280,8 +321,10 @@ def load_forecast_history(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     """
     Load and aggregate forecasting history.
 
-    Expected monthly columns look like:
-    ith_01, ith_02, ith_03 ... etc
+    IMPORTANT:
+    The forecast file month order is reversed in the export:
+    - ith_24 = most recent month
+    - ith_01 = oldest month
     """
     raw = load_file_from_bytes(file_bytes, file_name).copy()
     raw.columns = [str(c).replace("\n", " ").strip().lower() for c in raw.columns]
@@ -315,7 +358,7 @@ def load_forecast_history(file_bytes: bytes, file_name: str) -> pd.DataFrame:
 
     grouped = raw.groupby("ith_part", as_index=False)[month_cols].sum()
 
-    newest_first = sorted(month_cols, key=lambda x: int(x.split("_")[1]))
+    newest_first = get_forecast_month_columns_newest_first(month_cols)
     newest_3 = newest_first[:3]
     newest_6 = newest_first[:6]
     newest_12 = newest_first[:12]
@@ -328,6 +371,8 @@ def load_forecast_history(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     grouped["Forecast_6m_Avg"] = grouped[newest_6].mean(axis=1)
     grouped["Forecast_12m_Avg"] = grouped[newest_12].mean(axis=1)
 
+    # Weighted average using the 6 most recent months.
+    # The first value in newest_6 is the most recent month.
     weights = np.array([6, 5, 4, 3, 2, 1], dtype=float)
     weighted_values = grouped[newest_6].to_numpy(dtype=float)
     grouped["Forecast_Weighted_6m"] = (weighted_values * weights).sum(axis=1) / weights.sum()
@@ -339,6 +384,9 @@ def load_forecast_history(file_bytes: bytes, file_name: str) -> pd.DataFrame:
 
 
 def load_forecast_history_from_path(file_path: str | Path) -> pd.DataFrame:
+    """
+    Convenience wrapper for loading forecast data directly from file path.
+    """
     file_bytes, file_name = read_file_bytes(file_path)
     return load_forecast_history(file_bytes, file_name)
 
@@ -373,6 +421,7 @@ def apply_inventory_logic(
     exclude_nla: bool = True,
     selected_main_filters: list[str] | None = None,
     selected_priorities: list[str] | None = None,
+    selected_locations: list[str] | None = None,
     only_below_min: bool = False,
     only_allocated: bool = False,
     text_search: str = "",
@@ -380,12 +429,14 @@ def apply_inventory_logic(
     sort_desc: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """
-    Main shared engine for both Streamlit UI and API use.
+    Main shared engine for API use.
+
     Returns:
     - filtered dataframe
     - metadata dict
     """
     selected_main_filters = selected_main_filters or []
+    selected_locations = selected_locations or []
 
     df = merge_inventory_and_forecast(inventory_df, forecast_df)
 
@@ -399,20 +450,12 @@ def apply_inventory_logic(
 
     main_filter_col, main_filter_label = get_filter_config(worksheet_type)
 
-    if "6mAvg" in df.columns:
-        df["6mAvg"] = pd.to_numeric(df["6mAvg"], errors="coerce").fillna(0)
-    else:
-        df["6mAvg"] = 0
+    # Make sure base demand columns always exist and are numeric.
+    df["6mAvg"] = pd.to_numeric(df.get("6mAvg", 0), errors="coerce").fillna(0)
+    df["12mAvg"] = pd.to_numeric(df.get("12mAvg", 0), errors="coerce").fillna(0)
 
-    if "12mAvg" in df.columns:
-        df["12mAvg"] = pd.to_numeric(df["12mAvg"], errors="coerce").fillna(0)
-    else:
-        df["12mAvg"] = 0
-
-    month_cols = sorted(
-        [c for c in df.columns if re.fullmatch(r"ith_\d{2}", c)],
-        key=lambda x: int(x.split("_")[1])
-    )
+    # Get forecast month columns in correct newest-to-oldest order.
+    month_cols = get_forecast_month_columns_newest_first(df.columns)
 
     if month_cols:
         for col in month_cols:
@@ -421,12 +464,16 @@ def apply_inventory_logic(
     df["Forecast Average"] = 0.0
     df["Forecast Months Used"] = 0
 
+    # -----------------------------------------------------
+    # DEMAND BASIS
+    # -----------------------------------------------------
     if forecast_loaded and demand_basis == "Custom Forecast Average" and month_cols:
         selected_month_cols = month_cols[:custom_forecast_months]
 
         df["Forecast Average"] = df[selected_month_cols].mean(axis=1)
         df["Forecast Months Used"] = len(selected_month_cols)
 
+        # Use forecast average first, otherwise fall back to worksheet averages.
         df["Demand_Per_Month_Used"] = np.where(
             df["Forecast Average"].fillna(0) > 0,
             df["Forecast Average"],
@@ -438,10 +485,11 @@ def apply_inventory_logic(
         )
 
     elif forecast_loaded and demand_basis == "Forecast_Weighted_6m":
-        if "Forecast_Weighted_6m" not in df.columns:
-            df["Forecast_Weighted_6m"] = 0
+        df["Forecast_Weighted_6m"] = pd.to_numeric(
+            df.get("Forecast_Weighted_6m", 0),
+            errors="coerce"
+        ).fillna(0)
 
-        df["Forecast_Weighted_6m"] = pd.to_numeric(df["Forecast_Weighted_6m"], errors="coerce").fillna(0)
         df["Forecast Average"] = df["Forecast_Weighted_6m"]
         df["Forecast Months Used"] = 6
 
@@ -456,6 +504,7 @@ def apply_inventory_logic(
         )
 
     else:
+        # Static worksheet demand basis, or fallback when no forecast file exists.
         if demand_basis not in df.columns:
             df[demand_basis] = 0
 
@@ -470,62 +519,65 @@ def apply_inventory_logic(
         else:
             df["Forecast Months Used"] = 0
 
+    # -----------------------------------------------------
+    # STOCK / ORDER CALCULATIONS
+    # -----------------------------------------------------
     df["Available"] = df["Qty on hand"] - df["Qty Allocated"]
     df["Target Stock"] = df["Demand_Per_Month_Used"] * months_target
     df["Recommended Order"] = np.ceil(df["Target Stock"] - df["Available"]).clip(lower=0)
 
     if use_eoq_rounding:
-        valid_eoq = (df["EOQ"] > 1)
+        valid_eoq = df["EOQ"] > 1
         df["Recommended Order"] = np.where(
             valid_eoq & (df["Recommended Order"] > 0),
             np.ceil(df["Recommended Order"] / df["EOQ"]) * df["EOQ"],
             df["Recommended Order"]
         )
 
-    df["Recommended Order"] = pd.to_numeric(df["Recommended Order"], errors="coerce").fillna(0).astype(int)
+    df["Recommended Order"] = (
+        pd.to_numeric(df["Recommended Order"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
 
+    # Use actual Min where available, otherwise default to 5.
     df["Effective Min"] = np.where(
         pd.to_numeric(df["Min"], errors="coerce").fillna(0) > 0,
         pd.to_numeric(df["Min"], errors="coerce").fillna(0),
         5
     )
 
-    df["Effective Min"] = np.where(
-        pd.to_numeric(df["Min"], errors="coerce").fillna(0) > 0,
-        pd.to_numeric(df["Min"], errors="coerce").fillna(0),
-        5
-    )
-
+    # -----------------------------------------------------
+    # PRIORITY LOGIC
+    # -----------------------------------------------------
+    # This matches the current app logic:
+    # - URGENT if Net After POs < 0
+    # - REPLENISH if Net After POs >= 0 but below Effective Min
+    # - OK otherwise
     df["Priority V2"] = "🟢 OK"
-
-    # Option B priority logic based on post-PO stock position:
-    # - URGENT if Net After POs is still negative
-    # - REPLENISH if Net After POs is non-negative but still below Effective Min
-    # - OK if Net After POs meets or exceeds Effective Min
     df.loc[df["Net After POs"] < 0, "Priority V2"] = "🔴 URGENT"
-
     df.loc[
         (df["Net After POs"] >= 0) &
         (df["Net After POs"] < df["Effective Min"]),
         "Priority V2"
     ] = "🟡 REPLENISH"
 
-    # Second pass override:
-    # If the item looked urgent, but incoming POs fully cover the shortage,
-    # mark it back to OK.
-    df.loc[
-        (df["Available"] < 0) &
-        (df["Net After POs"] >= 0),
-        "Priority V2"
-    ] = "🟢 OK"
-
+    # Default API behaviour if priorities were not provided.
     if selected_priorities is None:
         selected_priorities = sorted(df["Priority V2"].dropna().unique().tolist())
 
+    # -----------------------------------------------------
+    # FILTERS
+    # -----------------------------------------------------
     filtered = df.copy()
 
     if selected_main_filters:
         filtered = filtered[filtered[main_filter_col].isin(selected_main_filters)]
+
+    if selected_locations:
+        filtered = filtered[
+            filtered["Loc"].astype(str).str.strip().isin(selected_locations)
+        ]
 
     if selected_priorities:
         filtered = filtered[filtered["Priority V2"].isin(selected_priorities)]
@@ -549,6 +601,9 @@ def apply_inventory_logic(
             filtered["Description"].astype(str).str.lower().str.contains(q, na=False)
         ]
 
+    # -----------------------------------------------------
+    # SORTING
+    # -----------------------------------------------------
     sort_options = [
         "Recommended Order",
         "Qty Allocated",
@@ -568,6 +623,9 @@ def apply_inventory_logic(
         "Forecast_Weighted_6m",
     ]
     sort_options = [c for c in sort_options if c in filtered.columns]
+
+    if not sort_options:
+        raise ValueError("No valid sort columns available after processing the dataset.")
 
     if sort_col not in sort_options:
         sort_col = "Recommended Order" if "Recommended Order" in sort_options else sort_options[0]
@@ -591,6 +649,7 @@ def apply_inventory_logic(
         "forecast_matches": int(df["Forecast Matched?"].sum()) if "Forecast Matched?" in df.columns else 0,
         "sort_col": sort_col,
         "sort_desc": sort_desc,
+        "selected_locations": selected_locations,
     }
 
     return filtered, meta
@@ -612,12 +671,16 @@ def load_and_run(
     exclude_nla: bool = True,
     selected_main_filters: list[str] | None = None,
     selected_priorities: list[str] | None = None,
+    selected_locations: list[str] | None = None,
     only_below_min: bool = False,
     only_allocated: bool = False,
     text_search: str = "",
     sort_col: str = "Recommended Order",
     sort_desc: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Load inventory + optional forecast from file paths, then apply logic.
+    """
     inventory_df = clean_inventory_data_from_path(inventory_path)
 
     forecast_df = None
@@ -636,6 +699,7 @@ def load_and_run(
         exclude_nla=exclude_nla,
         selected_main_filters=selected_main_filters,
         selected_priorities=selected_priorities,
+        selected_locations=selected_locations,
         only_below_min=only_below_min,
         only_allocated=only_allocated,
         text_search=text_search,
@@ -676,6 +740,7 @@ def get_part_details(
         exclude_nla=exclude_nla,
         selected_main_filters=[],
         selected_priorities=[],
+        selected_locations=[],
         only_below_min=False,
         only_allocated=False,
         text_search="",
@@ -728,10 +793,12 @@ def explain_part_decision(
         "Description": details.get("Description"),
         "Supplier": details.get("POREF_SUPP"),
         "Type": details.get("Type"),
+        "Location": details.get("Loc"),
         "Qty_on_hand": details.get("Qty on hand"),
         "Qty_allocated": details.get("Qty Allocated"),
         "Qty_on_order": details.get("Qty on Order"),
         "Available": details.get("Available"),
+        "Available_Now": details.get("Available Now"),
         "Net_After_POs": details.get("Net After POs"),
         "Min": details.get("Min"),
         "Effective_Min": details.get("Effective Min"),
@@ -746,6 +813,7 @@ def explain_part_decision(
         "Forecast_Matched": details.get("Forecast Matched?"),
         "Reasoning": {
             "available_rule": "Available = Qty on hand - Qty Allocated",
+            "net_after_pos_rule": "Net After POs = Qty on hand + Qty on Order - Qty Allocated",
             "target_stock_rule": f"Target Stock = Demand_Per_Month_Used x Months Target ({months_target})",
             "recommended_order_rule": "Recommended Order = ceil(Target Stock - Available), minimum 0",
             "priority_rule": (
@@ -753,6 +821,7 @@ def explain_part_decision(
                 "REPLENISH if Net After POs >= 0 and Net After POs < Effective Min; "
                 "otherwise OK"
             ),
+            "forecast_month_order_rule": "ith_24 is treated as the most recent forecast month",
         },
     }
 
