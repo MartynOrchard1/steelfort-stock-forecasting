@@ -10,8 +10,6 @@ from utils.helpers import normalize_part_number
 def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     """
     Load and clean the inventory dataset into a standard structure.
-
-    This gives the rest of the app predictable column names and numeric fields.
     """
     raw_df = load_file_from_bytes(file_bytes, file_name)
     df = raw_df.copy()
@@ -122,9 +120,10 @@ def apply_inventory_calculations(
     Apply main ordering calculations after inventory and forecast data are merged.
 
     CHANGED:
+    - Recommended Order is now based on Net After POs, not just Available
+    - Parts already sufficiently covered by incoming POs are stripped out of ordering
+    - Zero-demand items do not auto-order
     - Adds Order Decision and Decision Reason
-    - Prevents zero-demand items from auto-ordering just because stock is negative
-    - Preserves existing PO offset / urgency behaviour
     """
     df = df.copy()
 
@@ -177,8 +176,18 @@ def apply_inventory_calculations(
     df["Available"] = df["Qty on hand"] - df["Qty Allocated"]
     df["Target Stock"] = df["Demand_Per_Month_Used"] * months_target
 
-    # CHANGED: keep the raw recommendation first
-    df["Base Recommended Order"] = np.ceil(df["Target Stock"] - df["Available"]).clip(lower=0)
+    df["Effective Min"] = np.where(
+        pd.to_numeric(df["Min"], errors="coerce").fillna(0) > 0,
+        pd.to_numeric(df["Min"], errors="coerce").fillna(0),
+        5,
+    )
+
+    # -----------------------------------------------------
+    # CHANGED: BASE ORDER SHOULD USE NET AFTER POS
+    # -----------------------------------------------------
+    df["Base Recommended Order"] = np.ceil(
+        df["Target Stock"] - df["Net After POs"]
+    ).clip(lower=0)
 
     if use_eoq_rounding:
         valid_eoq = df["EOQ"] > 1
@@ -194,16 +203,11 @@ def apply_inventory_calculations(
         .astype(int)
     )
 
-    # CHANGED: Recommended Order now becomes the final decision-aware output
     df["Recommended Order"] = df["Base Recommended Order"]
 
-    df["Effective Min"] = np.where(
-        pd.to_numeric(df["Min"], errors="coerce").fillna(0) > 0,
-        pd.to_numeric(df["Min"], errors="coerce").fillna(0),
-        5,
-    )
-
-    # Existing priority logic kept intact
+    # -----------------------------------------------------
+    # EXISTING PRIORITY LOGIC
+    # -----------------------------------------------------
     df["Priority V2"] = "🟢 OK"
     df.loc[df["Net After POs"] < 0, "Priority V2"] = "🔴 URGENT"
     df.loc[
@@ -212,7 +216,7 @@ def apply_inventory_calculations(
     ] = "🟡 REPLENISH"
 
     # -----------------------------------------------------
-    # CHANGED: ORDER DECISION LOGIC
+    # ORDER DECISION LOGIC
     # -----------------------------------------------------
     forecast_zero = df["Forecast Average"].fillna(0) <= 0
     demand_zero = df["Demand_Per_Month_Used"].fillna(0) <= 0
@@ -226,33 +230,39 @@ def apply_inventory_calculations(
     df["Order Decision"] = "REVIEW"
     df["Decision Reason"] = "Manual review required"
 
-    # 1. Positive demand + below target = ORDER
+    # Genuine order need
     mask_order = has_positive_demand & below_target_after_pos & (df["Base Recommended Order"] > 0)
     df.loc[mask_order, "Order Decision"] = "ORDER"
-    df.loc[mask_order, "Decision Reason"] = "Positive forecast and below target"
+    df.loc[mask_order, "Decision Reason"] = "Positive forecast and below target after POs"
 
-    # 2. On-order stock already covers target = DO NOT ORDER
+    # Already covered by on-order stock / current net position
     mask_po_covers_target = po_covers_target
     df.loc[mask_po_covers_target, "Order Decision"] = "DO NOT ORDER"
     df.loc[mask_po_covers_target, "Decision Reason"] = "On order already covers target"
 
-    # 3. Zero forecast + zero recent usage = cash-flow protection rules
+    # Zero-demand dead stock cases
     mask_zero_demand_clear = zero_demand & (df["Net After POs"].fillna(0) >= 0)
     df.loc[mask_zero_demand_clear, "Order Decision"] = "DO NOT ORDER"
     df.loc[mask_zero_demand_clear, "Decision Reason"] = "Zero forecast and zero recent usage"
 
-    # 4. Negative stock with no demand support = REVIEW, not ORDER
+    # Negative stock but still no demand support = review only
     mask_zero_demand_negative = zero_demand & (df["Available"].fillna(0) < 0)
     df.loc[mask_zero_demand_negative, "Order Decision"] = "REVIEW"
     df.loc[mask_zero_demand_negative, "Decision Reason"] = "Negative stock but no forecast demand"
 
-    # 5. Preserve existing PO-offset behaviour for shortage situations
+    # Existing PO already offsets negative available
     mask_po_covers_shortage = zero_demand & (df["Available"].fillna(0) < 0) & po_covers_shortage
     df.loc[mask_po_covers_shortage, "Order Decision"] = "DO NOT ORDER"
     df.loc[mask_po_covers_shortage, "Decision Reason"] = "On order already covers shortage"
 
-    # Final recommended order should only remain on true ORDER rows
+    # Final safety: anything fully covered after POs should never retain order qty
     df.loc[df["Order Decision"] != "ORDER", "Recommended Order"] = 0
+
+    # Final safety: if net after POs already covers target, definitely zero out
+    df.loc[df["Net After POs"] >= df["Target Stock"], "Recommended Order"] = 0
+    df.loc[df["Net After POs"] >= df["Target Stock"], "Order Decision"] = "DO NOT ORDER"
+    df.loc[df["Net After POs"] >= df["Target Stock"], "Decision Reason"] = "On order already covers target"
+
     df["Recommended Order"] = (
         pd.to_numeric(df["Recommended Order"], errors="coerce")
         .fillna(0)
@@ -305,7 +315,10 @@ def apply_inventory_filters(
     if exclude_nla:
         filtered = filtered[~filtered["Is NLA?"]]
 
-    if only_need_order:
+    # CHANGED: only show genuine order rows, not all weird review cases
+    if only_need_order and "Order Decision" in filtered.columns:
+        filtered = filtered[filtered["Order Decision"] == "ORDER"]
+    elif only_need_order:
         filtered = filtered[filtered["Recommended Order"] > 0]
 
     if text_search:
