@@ -163,7 +163,6 @@ def render_inventory_mode(worksheet_type: str) -> None:
     sort_options = [
         "Recommended Order",
         "Base Recommended Order",
-        "Order Decision",
         "Qty Allocated",
         "Target Stock",
         "Demand_Per_Month_Used",
@@ -188,17 +187,13 @@ def render_inventory_mode(worksheet_type: str) -> None:
     if not filtered.empty:
         filtered = filtered.sort_values(sort_col, ascending=not sort_desc)
 
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Rows shown", f"{len(filtered):,}")
     k2.metric("Allocated units", f"{int(filtered['Qty Allocated'].sum()) if not filtered.empty else 0:,}")
     k3.metric("Units to Order", f"{int(filtered['Recommended Order'].sum()) if not filtered.empty else 0:,}")
     k4.metric("Urgent items", f"{int((filtered['Priority V2'] == '🔴 URGENT').sum()) if not filtered.empty else 0:,}")
-    k5.metric(
-        "Review items",
-        f"{int((filtered['Order Decision'] == 'REVIEW').sum()) if ('Order Decision' in filtered.columns and not filtered.empty) else 0:,}"
-    )
     matched_count = int(df["Forecast Matched?"].sum()) if "Forecast Matched?" in df.columns else 0
-    k6.metric("Forecast matches", f"{matched_count:,}")
+    k5.metric("Forecast matches", f"{matched_count:,}")
 
     if forecast_loaded and demand_basis == "Custom Forecast Average":
         st.caption(
@@ -211,14 +206,12 @@ def render_inventory_mode(worksheet_type: str) -> None:
     if worksheet_type == "MTD":
         simple_review_columns = [
             "Part_Number", "Description", "Type", "Loc", "Qty on hand", "Qty Allocated",
-            "Qty on Order", "Available", "Net After POs",
-            "Recommended Order", "Order Decision", "Decision Reason", "Priority V2"
+            "Qty on Order", "Available", "Net After POs", "Recommended Order", "Priority V2"
         ]
     else:
         simple_review_columns = [
             "Part_Number", "Description", "POREF_SUPP", "Qty on hand", "Qty Allocated",
-            "Qty on Order", "Available", "Net After POs",
-            "Recommended Order", "Order Decision", "Decision Reason", "Priority V2"
+            "Qty on Order", "Available", "Net After POs", "Recommended Order", "Priority V2"
         ]
 
     simple_review_columns = [c for c in simple_review_columns if c in filtered.columns]
@@ -227,13 +220,9 @@ def render_inventory_mode(worksheet_type: str) -> None:
         "Part_Number", "Description", "POREF_SUPP", "Type", "Loc", "Qty on hand",
         "Qty Allocated", "Qty on Order", "Available", "Net After POs", "Min",
         "Effective Min", "Max", "Demand_Per_Month_Used", "Forecast Average",
-        "Forecast Months Used", "Target Stock",
-        "Base Recommended Order",
-        "Recommended Order",
-        "Order Decision",
-        "Decision Reason",
-        "EOQ",
-        "6mAvg", "6mUsage", "12mAvg", "12mUsage", "Priority V2", "Forecast Matched?"
+        "Forecast Months Used", "Target Stock", "Base Recommended Order",
+        "Recommended Order", "EOQ", "6mAvg", "6mUsage", "12mAvg", "12mUsage",
+        "Priority V2", "Forecast Matched?"
     ]
     detailed_review_columns = [c for c in detailed_review_columns if c in filtered.columns]
 

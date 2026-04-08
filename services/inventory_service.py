@@ -119,11 +119,11 @@ def apply_inventory_calculations(
     """
     Apply main ordering calculations after inventory and forecast data are merged.
 
-    CHANGED:
-    - Recommended Order is now based on Net After POs, not just Available
-    - Parts already sufficiently covered by incoming POs are stripped out of ordering
-    - Zero-demand items do not auto-order
-    - Adds Order Decision and Decision Reason
+    Logic kept simple:
+    - demand chosen from selected basis
+    - target stock = monthly demand * months target
+    - recommended order = target stock - net after POs
+    - if inbound stock already covers target, recommended order = 0
     """
     df = df.copy()
 
@@ -176,15 +176,6 @@ def apply_inventory_calculations(
     df["Available"] = df["Qty on hand"] - df["Qty Allocated"]
     df["Target Stock"] = df["Demand_Per_Month_Used"] * months_target
 
-    df["Effective Min"] = np.where(
-        pd.to_numeric(df["Min"], errors="coerce").fillna(0) > 0,
-        pd.to_numeric(df["Min"], errors="coerce").fillna(0),
-        5,
-    )
-
-    # -----------------------------------------------------
-    # CHANGED: BASE ORDER SHOULD USE NET AFTER POS
-    # -----------------------------------------------------
     df["Base Recommended Order"] = np.ceil(
         df["Target Stock"] - df["Net After POs"]
     ).clip(lower=0)
@@ -205,63 +196,18 @@ def apply_inventory_calculations(
 
     df["Recommended Order"] = df["Base Recommended Order"]
 
-    # -----------------------------------------------------
-    # EXISTING PRIORITY LOGIC
-    # -----------------------------------------------------
+    df["Effective Min"] = np.where(
+        pd.to_numeric(df["Min"], errors="coerce").fillna(0) > 0,
+        pd.to_numeric(df["Min"], errors="coerce").fillna(0),
+        5,
+    )
+
     df["Priority V2"] = "🟢 OK"
     df.loc[df["Net After POs"] < 0, "Priority V2"] = "🔴 URGENT"
     df.loc[
         (df["Net After POs"] >= 0) & (df["Net After POs"] < df["Effective Min"]),
         "Priority V2"
     ] = "🟡 REPLENISH"
-
-    # -----------------------------------------------------
-    # ORDER DECISION LOGIC
-    # -----------------------------------------------------
-    forecast_zero = df["Forecast Average"].fillna(0) <= 0
-    demand_zero = df["Demand_Per_Month_Used"].fillna(0) <= 0
-    zero_demand = forecast_zero & demand_zero
-
-    has_positive_demand = df["Demand_Per_Month_Used"].fillna(0) > 0
-    below_target_after_pos = df["Net After POs"].fillna(0) < df["Target Stock"].fillna(0)
-    po_covers_target = df["Net After POs"].fillna(0) >= df["Target Stock"].fillna(0)
-    po_covers_shortage = df["Qty on Order"].fillna(0) >= (-df["Available"].clip(upper=0))
-
-    df["Order Decision"] = "REVIEW"
-    df["Decision Reason"] = "Manual review required"
-
-    # Genuine order need
-    mask_order = has_positive_demand & below_target_after_pos & (df["Base Recommended Order"] > 0)
-    df.loc[mask_order, "Order Decision"] = "ORDER"
-    df.loc[mask_order, "Decision Reason"] = "Positive forecast and below target after POs"
-
-    # Already covered by on-order stock / current net position
-    mask_po_covers_target = po_covers_target
-    df.loc[mask_po_covers_target, "Order Decision"] = "DO NOT ORDER"
-    df.loc[mask_po_covers_target, "Decision Reason"] = "On order already covers target"
-
-    # Zero-demand dead stock cases
-    mask_zero_demand_clear = zero_demand & (df["Net After POs"].fillna(0) >= 0)
-    df.loc[mask_zero_demand_clear, "Order Decision"] = "DO NOT ORDER"
-    df.loc[mask_zero_demand_clear, "Decision Reason"] = "Zero forecast and zero recent usage"
-
-    # Negative stock but still no demand support = review only
-    mask_zero_demand_negative = zero_demand & (df["Available"].fillna(0) < 0)
-    df.loc[mask_zero_demand_negative, "Order Decision"] = "REVIEW"
-    df.loc[mask_zero_demand_negative, "Decision Reason"] = "Negative stock but no forecast demand"
-
-    # Existing PO already offsets negative available
-    mask_po_covers_shortage = zero_demand & (df["Available"].fillna(0) < 0) & po_covers_shortage
-    df.loc[mask_po_covers_shortage, "Order Decision"] = "DO NOT ORDER"
-    df.loc[mask_po_covers_shortage, "Decision Reason"] = "On order already covers shortage"
-
-    # Final safety: anything fully covered after POs should never retain order qty
-    df.loc[df["Order Decision"] != "ORDER", "Recommended Order"] = 0
-
-    # Final safety: if net after POs already covers target, definitely zero out
-    df.loc[df["Net After POs"] >= df["Target Stock"], "Recommended Order"] = 0
-    df.loc[df["Net After POs"] >= df["Target Stock"], "Order Decision"] = "DO NOT ORDER"
-    df.loc[df["Net After POs"] >= df["Target Stock"], "Decision Reason"] = "On order already covers target"
 
     df["Recommended Order"] = (
         pd.to_numeric(df["Recommended Order"], errors="coerce")
@@ -315,10 +261,7 @@ def apply_inventory_filters(
     if exclude_nla:
         filtered = filtered[~filtered["Is NLA?"]]
 
-    # CHANGED: only show genuine order rows, not all weird review cases
-    if only_need_order and "Order Decision" in filtered.columns:
-        filtered = filtered[filtered["Order Decision"] == "ORDER"]
-    elif only_need_order:
+    if only_need_order:
         filtered = filtered[filtered["Recommended Order"] > 0]
 
     if text_search:

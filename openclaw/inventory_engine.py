@@ -39,13 +39,6 @@ def normalize_part_number(series: pd.Series) -> pd.Series:
     """
     Standardise part numbers so inventory and forecast files
     are more likely to merge correctly.
-
-    This:
-    - converts to string
-    - strips leading/trailing spaces
-    - removes repeated internal spaces
-    - removes trailing '.0' from Excel-style values
-    - converts to uppercase
     """
     return (
         series.astype(str)
@@ -88,9 +81,6 @@ def read_file_bytes(file_path: str | Path) -> tuple[bytes, str]:
 def load_file_from_bytes(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     """
     Load either a CSV or Excel file from raw bytes.
-
-    This function tries to detect the real header row instead of
-    assuming the first row is always the header.
     """
     file_name = file_name.lower()
 
@@ -183,14 +173,6 @@ def load_file_from_path(file_path: str | Path) -> pd.DataFrame:
 def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     """
     Load and clean the inventory dataset.
-
-    This function:
-    - removes junk rows/columns
-    - standardises column names
-    - fills in missing expected columns
-    - converts numeric columns properly
-    - calculates stock health fields
-    - creates the original Priority field
     """
     raw_df = load_file_from_bytes(file_bytes, file_name)
     df = raw_df.copy()
@@ -311,11 +293,6 @@ def clean_inventory_data_from_path(file_path: str | Path) -> pd.DataFrame:
 def load_forecast_history(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     """
     Load and aggregate forecasting history.
-
-    IMPORTANT:
-    The forecast file month order is reversed in the export:
-    - ith_24 = most recent month
-    - ith_01 = oldest month
     """
     raw = load_file_from_bytes(file_bytes, file_name).copy()
     raw.columns = [str(c).replace("\n", " ").strip().lower() for c in raw.columns]
@@ -451,9 +428,6 @@ def apply_inventory_logic(
     df["Forecast Average"] = 0.0
     df["Forecast Months Used"] = 0
 
-    # -----------------------------------------------------
-    # DEMAND BASIS
-    # -----------------------------------------------------
     if forecast_loaded and demand_basis == "Custom Forecast Average" and month_cols:
         selected_month_cols = month_cols[:custom_forecast_months]
 
@@ -504,13 +478,9 @@ def apply_inventory_logic(
         else:
             df["Forecast Months Used"] = 0
 
-    # -----------------------------------------------------
-    # STOCK / ORDER CALCULATIONS
-    # -----------------------------------------------------
     df["Available"] = df["Qty on hand"] - df["Qty Allocated"]
     df["Target Stock"] = df["Demand_Per_Month_Used"] * months_target
 
-    # Use Net After POs so inbound stock suppresses false orders
     df["Base Recommended Order"] = np.ceil(
         df["Target Stock"] - df["Net After POs"]
     ).clip(lower=0)
@@ -537,9 +507,6 @@ def apply_inventory_logic(
         5
     )
 
-    # -----------------------------------------------------
-    # PRIORITY LOGIC
-    # -----------------------------------------------------
     df["Priority V2"] = "🟢 OK"
     df.loc[df["Net After POs"] < 0, "Priority V2"] = "🔴 URGENT"
     df.loc[
@@ -547,48 +514,6 @@ def apply_inventory_logic(
         (df["Net After POs"] < df["Effective Min"]),
         "Priority V2"
     ] = "🟡 REPLENISH"
-
-    # -----------------------------------------------------
-    # ORDER DECISION LOGIC
-    # -----------------------------------------------------
-    forecast_zero = df["Forecast Average"].fillna(0) <= 0
-    demand_zero = df["Demand_Per_Month_Used"].fillna(0) <= 0
-    zero_demand = forecast_zero & demand_zero
-
-    has_positive_demand = df["Demand_Per_Month_Used"].fillna(0) > 0
-    below_target_after_pos = df["Net After POs"].fillna(0) < df["Target Stock"].fillna(0)
-    po_covers_target = df["Net After POs"].fillna(0) >= df["Target Stock"].fillna(0)
-    po_covers_shortage = df["Qty on Order"].fillna(0) >= (-df["Available"].clip(upper=0))
-
-    df["Order Decision"] = "REVIEW"
-    df["Decision Reason"] = "Manual review required"
-
-    mask_order = has_positive_demand & below_target_after_pos & (df["Base Recommended Order"] > 0)
-    df.loc[mask_order, "Order Decision"] = "ORDER"
-    df.loc[mask_order, "Decision Reason"] = "Positive forecast and below target after POs"
-
-    mask_po_covers_target = po_covers_target
-    df.loc[mask_po_covers_target, "Order Decision"] = "DO NOT ORDER"
-    df.loc[mask_po_covers_target, "Decision Reason"] = "On order already covers target"
-
-    mask_zero_demand_clear = zero_demand & (df["Net After POs"].fillna(0) >= 0)
-    df.loc[mask_zero_demand_clear, "Order Decision"] = "DO NOT ORDER"
-    df.loc[mask_zero_demand_clear, "Decision Reason"] = "Zero forecast and zero recent usage"
-
-    mask_zero_demand_negative = zero_demand & (df["Available"].fillna(0) < 0)
-    df.loc[mask_zero_demand_negative, "Order Decision"] = "REVIEW"
-    df.loc[mask_zero_demand_negative, "Decision Reason"] = "Negative stock but no forecast demand"
-
-    mask_po_covers_shortage = zero_demand & (df["Available"].fillna(0) < 0) & po_covers_shortage
-    df.loc[mask_po_covers_shortage, "Order Decision"] = "DO NOT ORDER"
-    df.loc[mask_po_covers_shortage, "Decision Reason"] = "On order already covers shortage"
-
-    df.loc[df["Order Decision"] != "ORDER", "Recommended Order"] = 0
-
-    # Hard stop: if net after POs already covers target, never order it
-    df.loc[df["Net After POs"] >= df["Target Stock"], "Recommended Order"] = 0
-    df.loc[df["Net After POs"] >= df["Target Stock"], "Order Decision"] = "DO NOT ORDER"
-    df.loc[df["Net After POs"] >= df["Target Stock"], "Decision Reason"] = "On order already covers target"
 
     df["Recommended Order"] = (
         pd.to_numeric(df["Recommended Order"], errors="coerce")
@@ -599,9 +524,6 @@ def apply_inventory_logic(
     if selected_priorities is None:
         selected_priorities = sorted(df["Priority V2"].dropna().unique().tolist())
 
-    # -----------------------------------------------------
-    # FILTERS
-    # -----------------------------------------------------
     filtered = df.copy()
 
     if selected_main_filters:
@@ -624,9 +546,7 @@ def apply_inventory_logic(
     if exclude_nla:
         filtered = filtered[~filtered["Is NLA?"]]
 
-    if only_need_order and "Order Decision" in filtered.columns:
-        filtered = filtered[filtered["Order Decision"] == "ORDER"]
-    elif only_need_order:
+    if only_need_order:
         filtered = filtered[filtered["Recommended Order"] > 0]
 
     if text_search:
@@ -636,13 +556,9 @@ def apply_inventory_logic(
             filtered["Description"].astype(str).str.lower().str.contains(q, na=False)
         ]
 
-    # -----------------------------------------------------
-    # SORTING
-    # -----------------------------------------------------
     sort_options = [
         "Recommended Order",
         "Base Recommended Order",
-        "Order Decision",
         "Qty Allocated",
         "Target Stock",
         "Demand_Per_Month_Used",
@@ -692,10 +608,6 @@ def apply_inventory_logic(
     return filtered, meta
 
 
-# =========================================================
-# CONVENIENCE HELPERS FOR API
-# =========================================================
-
 def load_and_run(
     inventory_path: str,
     forecast_path: str | None = None,
@@ -715,9 +627,6 @@ def load_and_run(
     sort_col: str = "Recommended Order",
     sort_desc: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """
-    Load inventory + optional forecast from file paths, then apply logic.
-    """
     inventory_df = clean_inventory_data_from_path(inventory_path)
 
     forecast_df = None
@@ -756,9 +665,6 @@ def get_part_details(
     use_eoq_rounding: bool = False,
     exclude_nla: bool = False,
 ) -> dict[str, Any] | None:
-    """
-    Return a single part row after all calculations have been applied.
-    """
     inventory_df = clean_inventory_data_from_path(inventory_path)
 
     forecast_df = None
@@ -807,9 +713,6 @@ def explain_part_decision(
     use_eoq_rounding: bool = False,
     exclude_nla: bool = False,
 ) -> dict[str, Any] | None:
-    """
-    Return a simplified explanation payload for a single part.
-    """
     details = get_part_details(
         inventory_path=inventory_path,
         forecast_path=forecast_path,
@@ -846,8 +749,6 @@ def explain_part_decision(
         "Target_Stock": details.get("Target Stock"),
         "Base_Recommended_Order": details.get("Base Recommended Order"),
         "Recommended_Order": details.get("Recommended Order"),
-        "Order_Decision": details.get("Order Decision"),
-        "Decision_Reason": details.get("Decision Reason"),
         "EOQ": details.get("EOQ"),
         "Priority_V2": details.get("Priority V2"),
         "Forecast_Matched": details.get("Forecast Matched?"),
