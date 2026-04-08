@@ -5,7 +5,7 @@ Keeping constants here avoids magic strings being repeated
 all over the project.
 """
 
-APP_TITLE = "Parts Order Forecasting"
+APP_TITLE = "Steelfort Stock Forecasting"
 APP_CAPTION = "Version 7.0.0 - Modular refactor with Bunnings as its own worksheet type"
 
 WORKSHEET_TYPES = ["Power Parts", "All Parts", "MTD", "Bunnings"]
