@@ -1,196 +1,155 @@
-# Supplier Order Review V6
+# 📦 Steelfort Stock Forecasting
 
-A high-performance Streamlit application designed to analyse inventory data, integrate forecasting, and generate intelligent ordering recommendations.
+A Streamlit application for analysing inventory data, integrating demand forecasting, and generating intelligent ordering recommendations — built for Steelfort's real-world inventory workflows.
 
-This tool is built to support real-world inventory workflows, particularly where legacy systems and inconsistent data structures make decision-making difficult.
+**Version:** 7.0.0 — Modular refactor with Bunnings as a dedicated worksheet type
+
+---
 
 ## Overview
 
-Supplier Order Review V6 allows users to:
+This tool helps procurement and operations teams cut through the noise of legacy inventory exports. Upload a stock file, optionally attach a forecast, and get clear, prioritised order recommendations in seconds — no spreadsheet wrangling required.
 
-- Upload inventory exports (CSV or Excel)
-- Optionally upload forecasting datasets
-- Automatically clean and standardise messy data
-- Calculate stock health and demand-driven ordering
-- Identify urgent and replenishment items
-- Filter, sort, and analyse large datasets instantly
-- Export recommended order lists
+---
 
-The application is optimised for large datasets using caching and efficient data processing.
+## Quick Start
 
-## Key Features
-### 1. Intelligent Data Cleaning
+**Install dependencies:**
+```bash
+pip install -r requirements.txt
+```
 
-- Detects header rows automatically
-- Normalises part numbers across datasets
-- Handles inconsistent column naming
-- Converts numeric fields safely
-- Flags NLA (No Longer Available) parts
+**Run the app:**
+```bash
+streamlit run app.py
+```
 
-### 2. Inventory Calculations
+**Or run with Docker:**
+```bash
+docker build -t steelfort-forecasting .
+docker run -p 8501:8501 steelfort-forecasting
+```
 
-- Available = Qty on Hand − Qty Allocated  
-- Net After POs = Qty on Hand + Qty on Order − Qty Allocated  
-- Target Stock = Demand per Month × Months Target  
-- Recommended Order = Target Stock − Available  
+Then open `http://localhost:8501` in your browser.
 
-Optional EOQ rounding is supported.
+---
 
-### 3. Forecast Integration
+## Workflow
 
-Supports multiple demand calculation methods:
+1. Select a **Worksheet Type** — Power Parts, All Parts, MTD, or Bunnings
+2. **Upload** your inventory file (CSV, XLSX, or XLS)
+3. Optionally **upload a forecast file** (monthly demand history)
+4. Configure **demand basis** and **months target** in the sidebar
+5. **Filter and review** recommended orders
+6. **Export** a CSV of your order list
 
-- Custom forecast average (1–24 months)
-- Weighted 6-month forecast
-- 6-month average (6mAvg)
-- 12-month average (12mAvg)
+---
 
-Automatically falls back to worksheet averages if forecast data is missing.
+## Worksheet Types
 
-### 4. Priority System (V2)
+| Type | Description |
+|---|---|
+| Power Parts | Filtered view for high-velocity parts |
+| All Parts | Full inventory scope |
+| MTD | Month-to-date demand view |
+| Bunnings | Dedicated mode for Bunnings supplier stock |
 
-Items are categorised into:
-
-- OK → Stock levels are sufficient  
-- REPLENISH → Below minimum stock level  
-- URGENT → Negative stock after considering incoming orders  
-
-A fallback minimum of 5 is applied where no minimum is defined.
-
-### 5. Dual Table Views
-
-#### Simple View
-
-Core operational fields:
-- Part Number
-- Description
-- Supplier
-- Qty on Hand
-- Qty Allocated
-- Qty on Order
-- Available
-- Net After POs
-- Recommended Order
-- Priority
-
-#### Detailed View
-
-Full dataset including:
-- Forecast data
-- Demand calculations
-- Min / Max levels
-- EOQ
-- Usage metrics
-
-### 6. Filtering & Search
-
-- Filter by Supplier or Type
-- Filter by Priority
-- Only show items needing order
-- Only allocated items
-- Only below minimum stock
-- Free-text search (Part Number / Description)
-
-### 7. Performance Optimisation
-
-- Uses caching for fast reloads
-- Processes large forecasting datasets efficiently
-- Minimises recomputation when filters change
-
-### 8. Interactive UI
-
-- Editable table with row selection
-- Popup modal for part details
-- Sidebar configuration panel
-
-Real-time metrics:
-- Rows shown
-- Allocated units
-- Units to order
-- Urgent items
-- Forecast match count
+---
 
 ## File Inputs
 
-### Inventory File (Required)
+### Inventory File *(required)*
+Accepted: `.csv`, `.xlsx`, `.xls`
 
-Accepted formats:
-- CSV
-- XLSX
-- XLS
+The loader auto-detects header rows and normalises column naming — so exports from most legacy systems should work out of the box. Expected fields include Part Number, Description, Supplier, Qty on Hand, Qty Allocated, Qty on Order, Min/Max levels, and usage averages.
 
-Expected fields (flexible naming supported):
-- Part Number
-- Description
-- Supplier
-- Qty on Hand
-- Qty Allocated
-- Qty on Order
-- Min / Max
-- Usage averages
-
-### Forecast File (Optional)
-
+### Forecast File *(optional)*
 Expected structure:
-- ith_part (Part Number)
-- Monthly columns: ith_01 → ith_24
+- `ith_part` — Part number
+- `ith_01` → `ith_24` — Monthly demand columns (ith_24 = most recent month)
 
-The system aggregates:
-- 3-month, 6-month, 12-month totals and averages
-- Weighted 6-month demand
+The system automatically aggregates 3-month, 6-month, and 12-month totals/averages, plus a recency-weighted 6-month demand figure. If a part has no forecast match, it falls back to worksheet averages.
 
-## How It Works
+---
 
-1. Upload inventory file  
-2. (Optional) Upload forecast file  
-3. Select:
-   - Worksheet type
-   - Demand basis
-   - Months target  
-4. Apply filters  
-5. Review recommended orders  
-6. Export results  
+## Calculations
 
-## Output
+| Field | Formula |
+|---|---|
+| Available | Qty on Hand − Qty Allocated |
+| Net After POs | Qty on Hand + Qty on Order − Qty Allocated |
+| Target Stock | Demand per Month × Months Target |
+| Recommended Order | Target Stock − Available |
 
-- Interactive table view
-- CSV download of filtered order list
-- Detailed part-level breakdown via popup
+Optional EOQ rounding can be applied via the sidebar.
 
-## Installation
+---
 
-pip install -r requirements.txt
-streamlit run app.py
+## Demand Basis Options
 
-## Performance Notes
+- Custom forecast average (1–24 months)
+- Weighted 6-month forecast (recency-weighted)
+- 6-month average (6mAvg)
+- 12-month average (12mAvg)
 
-- Designed for large datasets
-- Forecast file processing is cached
-- Significant speed improvements over previous versions
+---
 
-## Version
+## Priority System
 
-V6
+| Priority | Meaning |
+|---|---|
+| ✅ OK | Stock levels are sufficient |
+| 🟡 REPLENISH | Below minimum stock level |
+| 🔴 URGENT | Negative net stock (even after incoming orders) |
 
-Includes:
-- Forecast integration improvements
-- Dynamic demand basis
-- Performance optimisations
-- Table view modes (Simple / Detailed)
+Where no minimum stock level is defined, a fallback minimum of 5 is applied.
 
-## Source Code
+---
 
-Main application file:
-See attached script: :contentReference[oaicite:0]{index=0}
+## Project Structure
 
-## Future Improvements
+```
+steelfort-stock-forecasting/
+├── app.py                    # Streamlit entry point
+├── config.py                 # App-wide constants
+├── requirements.txt
+├── Dockerfile
+├── services/
+│   ├── bunnings_service.py   # Bunnings-specific data cleaning
+│   ├── forecast_service.py   # Forecast loading and merging
+│   ├── inventory_service.py  # Core inventory calculations
+│   └── file_loader.py        # Multi-format file ingestion
+├── ui/
+│   ├── inventory_view.py     # Main inventory table + controls
+│   ├── bunnings_view.py      # Bunnings-specific UI
+│   └── dialogs.py            # Part detail popups
+└── utils/
+    └── helpers.py            # Part number normalisation, shared utilities
+```
 
-- Integration with ERP systems (e.g., NetSuite)
-- Automated supplier ordering
+---
+
+## Dependencies
+
+```
+streamlit
+pandas
+openpyxl
+numpy
+```
+
+---
+
+## Roadmap
+
+- ERP integration (e.g. NetSuite)
+- Automated supplier order generation
 - Historical trend visualisation
 - AI-driven demand forecasting
 - Stock anomaly detection
 
+---
+
 ## Author
 
-Martyn James Orchard | Bachelor Of ICT Student | Major Software Engineering
+Martyn James Orchard — Bachelor of ICT, Software Engineering Major
