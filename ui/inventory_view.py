@@ -112,8 +112,9 @@ def render_inventory_mode(worksheet_type: str) -> None:
     else:
         demand_basis = st.sidebar.selectbox("Demand Basis", ["6mAvg", "12mAvg"])
 
-    month_cols = get_forecast_month_columns_newest_first(df.columns)
-
+    if not month_cols:
+        month_cols = get_forecast_month_columns_newest_first(df.columns)
+    
     df = apply_inventory_calculations(
         df=df,
         demand_basis=demand_basis,
