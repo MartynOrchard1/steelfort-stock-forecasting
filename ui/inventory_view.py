@@ -16,6 +16,8 @@ from utils.helpers import (
     get_uploaded_file_bytes,
 )
 
+from ui.demand_trend_preview import render_demand_trend_preview
+
 
 def render_inventory_mode(worksheet_type: str) -> None:
     """
@@ -46,13 +48,18 @@ def render_inventory_mode(worksheet_type: str) -> None:
         inventory_df = clean_inventory_data_cached(inventory_bytes, inventory_name)
 
     forecast_df = None
+    forecast_detail = None
     forecast_loaded = False
     forecast_mode = "Static worksheet averages"
-
+    month_cols = []
+    
     if forecast_file is not None:
         forecast_bytes, forecast_name = get_uploaded_file_bytes(forecast_file)
         with st.spinner("Loading forecasting file..."):
-            forecast_df = load_forecast_history_cached(forecast_bytes, forecast_name)
+            forecast_df, forecast_detail, month_cols = load_forecast_history_cached(
+                forecast_bytes,
+                forecast_name,
+            )
         forecast_loaded = True
         forecast_mode = "Forecast dataset"
 
@@ -105,8 +112,9 @@ def render_inventory_mode(worksheet_type: str) -> None:
     else:
         demand_basis = st.sidebar.selectbox("Demand Basis", ["6mAvg", "12mAvg"])
 
-    month_cols = get_forecast_month_columns_newest_first(df.columns)
-
+    if not month_cols:
+        month_cols = get_forecast_month_columns_newest_first(df.columns)
+    
     df = apply_inventory_calculations(
         df=df,
         demand_basis=demand_basis,
@@ -250,6 +258,7 @@ def render_inventory_mode(worksheet_type: str) -> None:
     )
 
     selected_rows = edited_table[edited_table["View"] == True]
+    selected_part_number = None
 
     if not selected_rows.empty:
         selected_row = selected_rows.iloc[0].copy()
@@ -257,7 +266,15 @@ def render_inventory_mode(worksheet_type: str) -> None:
         if "Priority" in selected_row.index and "Priority V2" not in selected_row.index:
             selected_row["Priority V2"] = selected_row["Priority"]
 
+        selected_part_number = selected_row.get("Part_Number")
         show_part_details_dialog(selected_row, demand_basis)
+
+    render_demand_trend_preview(
+        filtered_df=filtered,
+        forecast_detail=forecast_detail,
+        month_cols=month_cols,
+        selected_part_number=selected_part_number,
+    )
 
     csv_bytes = filtered.to_csv(index=False).encode("utf-8")
     st.download_button(
