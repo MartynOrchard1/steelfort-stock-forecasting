@@ -8,7 +8,7 @@ from utils.helpers import normalize_part_number, get_forecast_month_columns_newe
 
 
 @st.cache_data(show_spinner=False)
-def load_forecast_history_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+def load_forecast_history_cached(file_bytes: bytes, file_name: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """
     Load and aggregate forecasting history by part number.
 
@@ -67,7 +67,10 @@ def load_forecast_history_cached(file_bytes: bytes, file_name: str) -> pd.DataFr
     grouped = grouped.rename(columns={"ith_part": "Part_Number"})
     grouped["Part_Number"] = normalize_part_number(grouped["Part_Number"])
 
-    return grouped
+    detail = raw.rename(columns={"ith_part": "Part_Number"}).copy()
+    detail["Part_Number"] = normalize_part_number(detail["Part_Number"])
+
+    return grouped, detail, newest_first
 
 
 @st.cache_data(show_spinner=False)
