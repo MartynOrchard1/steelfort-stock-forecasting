@@ -16,6 +16,8 @@ from utils.helpers import (
     get_uploaded_file_bytes,
 )
 
+from ui.demand_trend_preview import render_demand_trend_preview
+
 
 def render_inventory_mode(worksheet_type: str) -> None:
     """
