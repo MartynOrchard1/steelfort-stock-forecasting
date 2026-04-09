@@ -544,8 +544,6 @@ def apply_inventory_calculations(
         + " | Net after POs: " + df["Net After POs"].round(2).astype(str)
     )
 
-    data_quality_flags = []
-
     zero_minmax = (df["Min"] <= 0) & (df["Max"] <= 0)
     zero_eoq = df["EOQ"] <= 0
     no_demand = df["Demand_Per_Month_Used"] <= 0
@@ -967,7 +965,7 @@ def build_bunnings_woh_estimate(
     result["Weeks_on_Hand"] = result["Weeks_on_Hand"].round(2)
     result["Monthly_Usage_Used"] = result["Monthly_Usage_Used"].round(2)
     result["Forecast_Monthly_Avg"] = result["Forecast_Monthly_Avg"].round(2)
-    result["Fallback_Monthly_Usage"] = result["Fallback_Monthly_Avg"] = result["Fallback_Monthly_Usage"].round(2)
+    result["Fallback_Monthly_Usage"] = result["Fallback_Monthly_Usage"].round(2)
     result["Recommended_Order_4W"] = pd.to_numeric(
         result["Recommended_Order_4W"], errors="coerce"
     ).fillna(0).astype(int)
@@ -1538,7 +1536,12 @@ def render_inventory_mode(worksheet_type: str) -> None:
             if default_part is None:
                 st.info("No filtered parts available for trend preview.")
             else:
-                chart_part = st.selectbox("Select part for trend preview", available_parts, index=available_parts.index(default_part), key="selected_part_for_chart")
+                chart_part = st.selectbox(
+                    "Select part for trend preview",
+                    available_parts,
+                    index=available_parts.index(default_part),
+                    key="selected_part_for_chart",
+                )
                 chart_rows = forecast_detail[forecast_detail["Part_Number"] == chart_part].copy()
 
                 if chart_rows.empty:
@@ -1552,7 +1555,10 @@ def render_inventory_mode(worksheet_type: str) -> None:
                         }
                     )
                     st.line_chart(trend_df.set_index("Month"))
-                    st.caption(f"Trend preview for {chart_part}. Left side is older months; right side is the most recent month from the forecast export.")
+                    st.caption(
+                        f"Trend preview for {chart_part}. Left side is older months; "
+                        f"right side is the most recent month from the forecast export."
+                    )
         else:
             st.info("Upload a forecast file to enable trend preview.")
 
