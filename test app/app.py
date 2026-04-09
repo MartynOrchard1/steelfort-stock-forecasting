@@ -11,7 +11,7 @@ import streamlit as st
 # =========================================================
 
 APP_TITLE = "Steelfort Stock Forecasting"
-APP_CAPTION = "Version 8.0.0 - Unified single-file Streamlit app"
+APP_CAPTION = "Version 9.0.0 - Unified single-file Streamlit app"
 
 WORKSHEET_TYPES = ["Power Parts", "All Parts", "MTD", "Bunnings"]
 
@@ -79,6 +79,16 @@ SESSION_KEYS_TO_CLEAR = [
     "forecast_file_bunnings_direct",
     "order_review_table",
     "bunnings_search_direct",
+    "selected_part_for_chart",
+]
+
+REVIEW_PRESETS = [
+    "Balanced Review",
+    "Urgent Buy Review",
+    "Allocated Pressure Review",
+    "Supplier Order Review",
+    "Low Noise Review",
+    "All Rows",
 ]
 
 # =========================================================
@@ -151,6 +161,12 @@ def _clear_app_state() -> None:
             del st.session_state[key]
 
 
+def _safe_divide(numerator, denominator):
+    denominator = pd.to_numeric(denominator, errors="coerce")
+    numerator = pd.to_numeric(numerator, errors="coerce")
+    return np.where(denominator > 0, numerator / denominator, np.nan)
+
+
 # =========================================================
 # FILE LOADING
 # =========================================================
@@ -158,12 +174,6 @@ def _clear_app_state() -> None:
 
 @st.cache_data(show_spinner=False)
 def load_file_from_bytes(file_bytes: bytes, file_name: str) -> pd.DataFrame:
-    """
-    Load a CSV or Excel file from raw bytes.
-
-    The loader scans for a valid header row so the app can handle
-    messy exports where headers are not always on row 1.
-    """
     file_name = file_name.lower()
 
     if file_name.endswith(".csv"):
@@ -228,13 +238,7 @@ def load_file_from_bytes(file_bytes: bytes, file_name: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_forecast_history_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
-    """
-    Load and aggregate forecasting history by part number.
-
-    IMPORTANT:
-    ith_24 is the most recent month.
-    """
+def load_forecast_history_cached(file_bytes: bytes, file_name: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     raw = load_file_from_bytes(file_bytes, file_name).copy()
     raw.columns = [str(c).replace("\n", " ").strip().lower() for c in raw.columns]
 
@@ -265,12 +269,13 @@ def load_forecast_history_cached(file_bytes: bytes, file_name: str) -> pd.DataFr
     for col in month_cols:
         raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0)
 
+    month_order = get_forecast_month_columns_newest_first(month_cols)
+
     grouped = raw.groupby("ith_part", as_index=False)[month_cols].sum()
 
-    newest_first = get_forecast_month_columns_newest_first(month_cols)
-    newest_3 = newest_first[:3]
-    newest_6 = newest_first[:6]
-    newest_12 = newest_first[:12]
+    newest_3 = month_order[:3]
+    newest_6 = month_order[:6]
+    newest_12 = month_order[:12]
 
     grouped["Forecast_3m_Total"] = grouped[newest_3].sum(axis=1)
     grouped["Forecast_6m_Total"] = grouped[newest_6].sum(axis=1)
@@ -281,16 +286,17 @@ def load_forecast_history_cached(file_bytes: bytes, file_name: str) -> pd.DataFr
     grouped["Forecast_12m_Avg"] = grouped[newest_12].mean(axis=1)
 
     weights = np.array([6, 5, 4, 3, 2, 1], dtype=float)
-    weighted_values = grouped[newest_6].to_numpy(dtype=float)
-    grouped["Forecast_Weighted_6m"] = (weighted_values * weights).sum(axis=1) / weights.sum()
+    grouped["Forecast_Weighted_6m"] = (grouped[newest_6].to_numpy(dtype=float) * weights).sum(axis=1) / weights.sum()
 
     grouped = grouped.rename(columns={"ith_part": "Part_Number"})
     grouped["Part_Number"] = normalize_part_number(grouped["Part_Number"])
 
-    return grouped
+    detail = raw.rename(columns={"ith_part": "Part_Number"}).copy()
+    detail["Part_Number"] = normalize_part_number(detail["Part_Number"])
+
+    return grouped, detail, month_order
 
 
-@st.cache_data(show_spinner=False)
 def merge_inventory_and_forecast(inventory_df: pd.DataFrame, forecast_df: pd.DataFrame | None) -> pd.DataFrame:
     if forecast_df is None:
         return inventory_df.copy()
@@ -304,9 +310,6 @@ def merge_inventory_and_forecast(inventory_df: pd.DataFrame, forecast_df: pd.Dat
 
 @st.cache_data(show_spinner=False)
 def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
-    """
-    Load and clean the inventory dataset into a standard structure.
-    """
     raw_df = load_file_from_bytes(file_bytes, file_name)
     df = raw_df.copy()
 
@@ -404,11 +407,6 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
     df["Shortage to Max"] = (df["Max"] - df["Net After POs"]).clip(lower=0)
     df["Below Min?"] = df["Net After POs"] < df["Min"]
 
-    df["Priority"] = "OK"
-    df.loc[(df["Min"] > 0) & (df["Below Min?"]), "Priority"] = "Review"
-    df.loc[(df["Min"] > 0) & (df["Below Min?"]) & (df["Qty Allocated"] > 0), "Priority"] = "High"
-    df.loc[(df["Qty Allocated"] > 0) & (df["Net After POs"] <= 0), "Priority"] = "Urgent"
-
     return df
 
 
@@ -421,29 +419,36 @@ def apply_inventory_calculations(
     custom_forecast_months: int,
     month_cols: list[str],
 ) -> pd.DataFrame:
-    """
-    Apply main ordering calculations after inventory and forecast data are merged.
-    """
     df = df.copy()
 
     df["6mAvg"] = pd.to_numeric(df.get("6mAvg", 0), errors="coerce").fillna(0)
     df["12mAvg"] = pd.to_numeric(df.get("12mAvg", 0), errors="coerce").fillna(0)
 
     for col in month_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df["Forecast Average"] = 0.0
     df["Forecast Months Used"] = 0
+    df["Demand_Source"] = "Worksheet Average"
 
     if forecast_loaded and demand_basis == "Custom Forecast Average" and month_cols:
         selected_month_cols = month_cols[:custom_forecast_months]
         df["Forecast Average"] = df[selected_month_cols].mean(axis=1)
         df["Forecast Months Used"] = len(selected_month_cols)
 
+        use_forecast = df["Forecast Average"].fillna(0) > 0
+        use_6m = (~use_forecast) & (df["6mAvg"].fillna(0) > 0)
+
         df["Demand_Per_Month_Used"] = np.where(
-            df["Forecast Average"].fillna(0) > 0,
+            use_forecast,
             df["Forecast Average"],
-            np.where(df["6mAvg"].fillna(0) > 0, df["6mAvg"], df["12mAvg"].fillna(0)),
+            np.where(use_6m, df["6mAvg"], df["12mAvg"].fillna(0)),
+        )
+        df["Demand_Source"] = np.where(
+            use_forecast,
+            f"Forecast Avg ({len(selected_month_cols)}m)",
+            np.where(use_6m, "Worksheet 6mAvg", "Worksheet 12mAvg"),
         )
 
     elif forecast_loaded and demand_basis == "Forecast_Weighted_6m":
@@ -453,10 +458,18 @@ def apply_inventory_calculations(
         df["Forecast Average"] = df["Forecast_Weighted_6m"]
         df["Forecast Months Used"] = 6
 
+        use_forecast = df["Forecast_Weighted_6m"].fillna(0) > 0
+        use_6m = (~use_forecast) & (df["6mAvg"].fillna(0) > 0)
+
         df["Demand_Per_Month_Used"] = np.where(
-            df["Forecast_Weighted_6m"].fillna(0) > 0,
+            use_forecast,
             df["Forecast_Weighted_6m"],
-            np.where(df["6mAvg"].fillna(0) > 0, df["6mAvg"], df["12mAvg"].fillna(0)),
+            np.where(use_6m, df["6mAvg"], df["12mAvg"].fillna(0)),
+        )
+        df["Demand_Source"] = np.where(
+            use_forecast,
+            "Forecast Weighted 6m",
+            np.where(use_6m, "Worksheet 6mAvg", "Worksheet 12mAvg"),
         )
 
     else:
@@ -471,6 +484,8 @@ def apply_inventory_calculations(
             df["Forecast Months Used"] = 6
         elif demand_basis == "12mAvg":
             df["Forecast Months Used"] = 12
+
+        df["Demand_Source"] = f"Worksheet {demand_basis}"
 
     df["Available"] = df["Qty on hand"] - df["Qty Allocated"]
     df["Target Stock"] = df["Demand_Per_Month_Used"] * months_target
@@ -504,9 +519,64 @@ def apply_inventory_calculations(
         "Priority V2",
     ] = "🟡 REPLENISH"
 
-    df["Recommended Order"] = (
-        pd.to_numeric(df["Recommended Order"], errors="coerce").fillna(0).astype(int)
+    df["Cover_Months_After_PO"] = _safe_divide(df["Net After POs"], df["Demand_Per_Month_Used"])
+    df["On_Order_Covers_Target?"] = df["Net After POs"] >= df["Target Stock"]
+    df["Has_Demand?"] = df["Demand_Per_Month_Used"] > 0
+
+    df["Demand_Gap_to_Target"] = (df["Target Stock"] - df["Net After POs"]).clip(lower=0)
+
+    df["Decision Summary"] = "OK - enough stock/inbound cover"
+    df.loc[df["Has_Demand?"] == False, "Decision Summary"] = "Low confidence - zero demand basis"
+    df.loc[(df["Priority V2"] == "🟡 REPLENISH"), "Decision Summary"] = "Below effective minimum"
+    df.loc[(df["Priority V2"] == "🔴 URGENT"), "Decision Summary"] = "Negative net stock after POs"
+    df.loc[
+        (df["Recommended Order"] > 0) & (df["Target Stock"] > df["Net After POs"]),
+        "Decision Summary"
+    ] = "Order required to reach target cover"
+    df.loc[
+        (df["Recommended Order"] == 0) & (df["On_Order_Covers_Target?"]),
+        "Decision Summary"
+    ] = "Existing stock and POs already cover target"
+
+    df["Decision Reason"] = (
+        "Demand source: " + df["Demand_Source"].astype(str)
+        + " | Target: " + df["Target Stock"].round(2).astype(str)
+        + " | Net after POs: " + df["Net After POs"].round(2).astype(str)
     )
+
+    data_quality_flags = []
+
+    zero_minmax = (df["Min"] <= 0) & (df["Max"] <= 0)
+    zero_eoq = df["EOQ"] <= 0
+    no_demand = df["Demand_Per_Month_Used"] <= 0
+    missing_forecast = forecast_loaded & (~df.get("Forecast_3m_Avg", pd.Series(index=df.index, dtype=float)).notna())
+    invalid_moh = df["Months on Hand Numeric"].isna() & df["Months on Hand"].astype(str).str.contains("DIV", case=False, na=False)
+    over_ordered = (df["Qty on Order"] > 0) & (df["Demand_Per_Month_Used"] > 0) & ((df["Qty on Order"] / df["Demand_Per_Month_Used"]) > 12)
+
+    flags = []
+    for idx in df.index:
+        row_flags = []
+        if zero_minmax.loc[idx]:
+            row_flags.append("No min/max")
+        if zero_eoq.loc[idx]:
+            row_flags.append("No EOQ")
+        if no_demand.loc[idx]:
+            row_flags.append("No demand")
+        if forecast_loaded and missing_forecast.loc[idx]:
+            row_flags.append("No forecast match")
+        if invalid_moh.loc[idx]:
+            row_flags.append("Invalid MOH")
+        if over_ordered.loc[idx]:
+            row_flags.append("High on-order vs demand")
+        if df.loc[idx, "Is NLA?"]:
+            row_flags.append("NLA description")
+        flags.append(" | ".join(row_flags) if row_flags else "Clean")
+
+    df["Data Quality Flags"] = flags
+    df["Data Quality Score"] = df["Data Quality Flags"].apply(lambda x: 0 if x == "Clean" else len(str(x).split(" | ")))
+    df["Confidence"] = "High"
+    df.loc[df["Data Quality Score"] >= 1, "Confidence"] = "Medium"
+    df.loc[df["Data Quality Score"] >= 3, "Confidence"] = "Low"
 
     return df
 
@@ -596,6 +666,94 @@ def apply_inventory_filters(
     return filtered
 
 
+def build_supplier_summary(df: pd.DataFrame, main_filter_col: str) -> pd.DataFrame:
+    if df.empty or main_filter_col not in df.columns:
+        return pd.DataFrame()
+
+    summary = (
+        df.groupby(main_filter_col, dropna=False)
+        .agg(
+            Rows=("Part_Number", "count"),
+            Need_Order=("Recommended Order", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) > 0).sum())),
+            Urgent=("Priority V2", lambda s: int((s == "🔴 URGENT").sum())),
+            Replenish=("Priority V2", lambda s: int((s == "🟡 REPLENISH").sum())),
+            Recommended_Qty=("Recommended Order", "sum"),
+            Allocated_Qty=("Qty Allocated", "sum"),
+            Demand_Per_Month=("Demand_Per_Month_Used", "sum"),
+        )
+        .reset_index()
+        .rename(columns={main_filter_col: "Group"})
+        .sort_values(["Recommended_Qty", "Urgent", "Need_Order"], ascending=[False, False, False])
+    )
+    return summary
+
+
+def build_inventory_export(df: pd.DataFrame, export_type: str) -> tuple[pd.DataFrame, str]:
+    if export_type == "Buyer Review":
+        cols = [
+            "Part_Number",
+            "Description",
+            "POREF_SUPP",
+            "Type",
+            "Loc",
+            "Qty on hand",
+            "Qty Allocated",
+            "Qty on Order",
+            "Net After POs",
+            "Demand_Per_Month_Used",
+            "Target Stock",
+            "Recommended Order",
+            "Priority V2",
+            "Decision Summary",
+            "Data Quality Flags",
+            "Confidence",
+        ]
+        cols = [c for c in cols if c in df.columns]
+        return df[cols].copy(), "buyer_review_export.csv"
+
+    if export_type == "Supplier PO Prep":
+        cols = [
+            "POREF_SUPP",
+            "Part_Number",
+            "Description",
+            "Recommended Order",
+            "Qty on hand",
+            "Qty Allocated",
+            "Qty on Order",
+            "Net After POs",
+            "Demand_Per_Month_Used",
+            "Decision Summary",
+        ]
+        cols = [c for c in cols if c in df.columns]
+        export_df = df[cols].copy()
+        export_df = export_df[export_df.get("Recommended Order", 0) > 0]
+        return export_df, "supplier_po_prep.csv"
+
+    if export_type == "Exception Report":
+        export_df = df[
+            (df["Recommended Order"] > 0)
+            | (df["Priority V2"] == "🔴 URGENT")
+            | (df["Data Quality Score"] > 0)
+            | (df["Qty Allocated"] > 0)
+        ].copy()
+        cols = [
+            "Part_Number",
+            "Description",
+            "POREF_SUPP",
+            "Type",
+            "Loc",
+            "Recommended Order",
+            "Priority V2",
+            "Decision Summary",
+            "Data Quality Flags",
+            "Confidence",
+        ]
+        cols = [c for c in cols if c in export_df.columns]
+        return export_df[cols], "exception_report.csv"
+
+    return df.copy(), "full_inventory_export.csv"
+
+
 # =========================================================
 # BUNNINGS SERVICES
 # =========================================================
@@ -679,7 +837,7 @@ def clean_bunnings_file_cached(file_bytes: bytes, file_name: str) -> pd.DataFram
 
 
 @st.cache_data(show_spinner=False)
-def load_bunnings_forecast_by_loc_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+def load_bunnings_forecast_by_loc_cached(file_bytes: bytes, file_name: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     raw = load_file_from_bytes(file_bytes, file_name).copy()
     raw.columns = [str(c).replace("\n", " ").strip().lower() for c in raw.columns]
 
@@ -712,17 +870,17 @@ def load_bunnings_forecast_by_loc_cached(file_bytes: bytes, file_name: str) -> p
     for col in month_cols:
         raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0)
 
+    month_order = get_forecast_month_columns_newest_first(month_cols)
+
     grouped = raw.groupby(["ith_part", "ith_loc"], as_index=False)[month_cols].sum()
-
-    newest_first = get_forecast_month_columns_newest_first(month_cols)
-    recent_6_cols = newest_first[:6]
-
+    recent_6_cols = month_order[:6]
     grouped["Forecast_Monthly_Avg"] = grouped[recent_6_cols].mean(axis=1)
     grouped["Forecast_6m_Avg"] = grouped["Forecast_Monthly_Avg"]
 
     grouped = grouped.rename(columns={"ith_part": "Match_Part", "ith_loc": "Forecast_Loc"})
+    detail = raw.rename(columns={"ith_part": "Match_Part", "ith_loc": "Forecast_Loc"}).copy()
 
-    return grouped
+    return grouped, detail, month_order
 
 
 def build_bunnings_woh_estimate(
@@ -755,6 +913,18 @@ def build_bunnings_woh_estimate(
         "CY24 Sales Fallback",
     )
 
+    result["Location_Match"] = np.where(
+        result["Forecast_Loc"].isin(["DC", "10"]),
+        "Mapped",
+        "Unmapped",
+    )
+    result["Usage_Confidence"] = "High"
+    result.loc[result["Usage_Source"] == "CY24 Sales Fallback", "Usage_Confidence"] = "Medium"
+    result.loc[
+        (result["Usage_Source"] == "CY24 Sales Fallback") & (result["Forecast_Loc"] == ""),
+        "Usage_Confidence"
+    ] = "Low"
+
     result["Weekly_Usage"] = result["Monthly_Usage_Used"] / 4.33
 
     result["Weeks_on_Hand"] = np.where(
@@ -773,14 +943,34 @@ def build_bunnings_woh_estimate(
     result.loc[result["Weeks_on_Hand"].fillna(999999) < 4, "Bunnings_Status"] = "🟠 RISK"
     result.loc[result["Weeks_on_Hand"].fillna(999999) < 1, "Bunnings_Status"] = "🔴 URGENT"
 
+    result["Data Quality Flags"] = ""
+    result.loc[result["Monthly_Usage_Used"] <= 0, "Data Quality Flags"] = "No usable demand"
+    result.loc[
+        (result["Data Quality Flags"] == "") & (result["Usage_Source"] == "CY24 Sales Fallback"),
+        "Data Quality Flags"
+    ] = "Fallback used"
+    result.loc[
+        (result["Data Quality Flags"] != "") & (result["Usage_Source"] == "CY24 Sales Fallback"),
+        "Data Quality Flags"
+    ] = result["Data Quality Flags"] + " | Fallback used"
+    result.loc[
+        (result["Data Quality Flags"] != "") & (result["Location_Match"] == "Unmapped"),
+        "Data Quality Flags"
+    ] = result["Data Quality Flags"] + " | Unmapped location"
+    result.loc[
+        (result["Data Quality Flags"] == "") & (result["Location_Match"] == "Unmapped"),
+        "Data Quality Flags"
+    ] = "Unmapped location"
+    result.loc[result["Data Quality Flags"] == "", "Data Quality Flags"] = "Clean"
+
     result["Weekly_Usage"] = result["Weekly_Usage"].round(2)
     result["Weeks_on_Hand"] = result["Weeks_on_Hand"].round(2)
     result["Monthly_Usage_Used"] = result["Monthly_Usage_Used"].round(2)
     result["Forecast_Monthly_Avg"] = result["Forecast_Monthly_Avg"].round(2)
-    result["Fallback_Monthly_Usage"] = result["Fallback_Monthly_Usage"].round(2)
-    result["Recommended_Order_4W"] = (
-        pd.to_numeric(result["Recommended_Order_4W"], errors="coerce").fillna(0).astype(int)
-    )
+    result["Fallback_Monthly_Usage"] = result["Fallback_Monthly_Avg"] = result["Fallback_Monthly_Usage"].round(2)
+    result["Recommended_Order_4W"] = pd.to_numeric(
+        result["Recommended_Order_4W"], errors="coerce"
+    ).fillna(0).astype(int)
 
     return result
 
@@ -790,145 +980,42 @@ def build_bunnings_woh_estimate(
 # =========================================================
 
 
-@st.dialog("Part Details", width="medium")
+@st.dialog("Part Details", width="large")
 def show_part_details_dialog(selected_row: pd.Series, demand_basis: str):
-    forecast_average_value = selected_row.get(
-        "Forecast Average",
-        selected_row.get("Demand_Per_Month_Used", 0),
-    )
-
-    def format_value(value):
-        if pd.isna(value):
-            return ""
-        if isinstance(value, (int, np.integer)):
-            return f"{int(value):,}"
-        if isinstance(value, (float, np.floating)):
-            if float(value).is_integer():
-                return f"{int(value):,}"
-            return f"{value:,.2f}"
-        return str(value)
-
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stDialog"] section[role="dialog"] {
-            max-width: 780px;
-        }
-
-        .popup-field {
-            background: linear-gradient(180deg, #141a24 0%, #10151d 100%);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 14px;
-            padding: 12px 14px;
-            margin-bottom: 12px;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.22);
-            min-height: 86px;
-        }
-
-        .popup-label {
-            font-size: 0.78rem;
-            color: #9aa4b2;
-            margin-bottom: 6px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.03em;
-        }
-
-        .popup-value {
-            font-size: 0.98rem;
-            color: #f3f4f6;
-            word-break: break-word;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
+    def field(label: str, value):
         st.markdown(
             f"""
-            <div class="popup-field">
-                <div class="popup-label">Part #</div>
-                <div class="popup-value">{format_value(selected_row.get("Part_Number", ""))}</div>
+            <div style="background:#141a24;border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px 14px;margin-bottom:12px;">
+                <div style="font-size:0.78rem;color:#9aa4b2;margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;">{label}</div>
+                <div style="font-size:0.98rem;color:#f3f4f6;word-break:break-word;">{format_numeric_display(value)}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        st.markdown(
-            f"""
-            <div class="popup-field">
-                <div class="popup-label">Description</div>
-                <div class="popup-value">{format_value(selected_row.get("Description", ""))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    left, right = st.columns(2)
 
-        st.markdown(
-            f"""
-            <div class="popup-field">
-                <div class="popup-label">Supplier</div>
-                <div class="popup-value">{format_value(selected_row.get("POREF_SUPP", ""))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    with left:
+        field("Part #", selected_row.get("Part_Number", ""))
+        field("Description", selected_row.get("Description", ""))
+        field("Supplier", selected_row.get("POREF_SUPP", ""))
+        field("Type", selected_row.get("Type", ""))
+        field("Location", selected_row.get("Loc", ""))
+        field("Decision Summary", selected_row.get("Decision Summary", ""))
+        field("Decision Reason", selected_row.get("Decision Reason", ""))
 
-        st.markdown(
-            f"""
-            <div class="popup-field">
-                <div class="popup-label">Qty on Order</div>
-                <div class="popup-value">{format_value(selected_row.get("Qty on Order", ""))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    with right:
+        field("Qty on Hand", selected_row.get("Qty on hand", ""))
+        field("Qty Allocated", selected_row.get("Qty Allocated", ""))
+        field("Qty on Order", selected_row.get("Qty on Order", ""))
+        field("Net After POs", selected_row.get("Net After POs", ""))
+        field("Demand / Month Used", selected_row.get("Demand_Per_Month_Used", ""))
+        field("Target Stock", selected_row.get("Target Stock", ""))
+        field("Recommended Order", selected_row.get("Recommended Order", ""))
+        field("Confidence", selected_row.get("Confidence", ""))
+        field("Data Quality Flags", selected_row.get("Data Quality Flags", ""))
 
-    with col2:
-        st.markdown(
-            f"""
-            <div class="popup-field">
-                <div class="popup-label">Available</div>
-                <div class="popup-value">{format_value(selected_row.get("Available", ""))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            f"""
-            <div class="popup-field">
-                <div class="popup-label">Recommended Order</div>
-                <div class="popup-value">{format_value(selected_row.get("Recommended Order", ""))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            f"""
-            <div class="popup-field">
-                <div class="popup-label">EOQ</div>
-                <div class="popup-value">{format_value(selected_row.get("EOQ", ""))}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            f"""
-            <div class="popup-field">
-                <div class="popup-label">Forecast / Avg Used</div>
-                <div class="popup-value">{format_value(forecast_average_value)}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.caption(f"Demand basis currently in use: {demand_basis}")
+    st.caption(f"Demand basis in use: {demand_basis}")
 
 
 # =========================================================
@@ -948,54 +1035,21 @@ def _inject_shell_styles() -> None:
     st.markdown(
         """
         <style>
-        .block-container {
-            padding-top: 1.4rem;
-            padding-bottom: 2rem;
-        }
-
+        .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
         .app-shell-card {
             border: 1px solid rgba(49, 51, 63, 0.18);
             background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
-            border-radius: 16px;
-            padding: 1rem 1.1rem;
-            margin-bottom: 0.9rem;
+            border-radius: 16px; padding: 1rem 1.1rem; margin-bottom: 0.9rem;
         }
-
-        .app-shell-title {
-            font-size: 2rem;
-            font-weight: 700;
-            line-height: 1.15;
-            margin-bottom: 0.35rem;
-        }
-
-        .app-shell-subtitle {
-            color: rgba(250, 250, 250, 0.78);
-            font-size: 0.98rem;
-            margin-bottom: 0;
-        }
-
+        .app-shell-title { font-size: 2rem; font-weight: 700; line-height: 1.15; margin-bottom: 0.35rem; }
+        .app-shell-subtitle { color: rgba(250, 250, 250, 0.78); font-size: 0.98rem; margin-bottom: 0; }
         .app-shell-kicker {
-            display: inline-block;
-            font-size: 0.78rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-            color: #7dd3fc;
-            margin-bottom: 0.55rem;
+            display: inline-block; font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.04em; color: #7dd3fc; margin-bottom: 0.55rem;
         }
-
-        .app-shell-list {
-            margin: 0.35rem 0 0 1.1rem;
-            padding: 0;
-        }
-
-        .app-shell-list li {
-            margin-bottom: 0.3rem;
-        }
-
-        div[data-testid="stSidebar"] .stButton button {
-            width: 100%;
-        }
+        .app-shell-list { margin: 0.35rem 0 0 1.1rem; padding: 0; }
+        .app-shell-list li { margin-bottom: 0.3rem; }
+        div[data-testid="stSidebar"] .stButton button { width: 100%; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1065,9 +1119,9 @@ def _render_header(worksheet_type: str) -> None:
         st.info(MODE_DETAILS[worksheet_type]["required"])
     with col3:
         if worksheet_type == "Bunnings":
-            st.info("Output focus: weeks on hand, status, and exportable review.")
+            st.info("Output focus: weeks on hand, usage confidence, and exportable review.")
         else:
-            st.info("Output focus: recommended orders, filtering, and part drilldown.")
+            st.info("Output focus: recommendation quality, noise reduction, and decision visibility.")
 
 
 def _render_landing_guidance(worksheet_type: str) -> None:
@@ -1092,13 +1146,13 @@ def _render_landing_guidance(worksheet_type: str) -> None:
             workflow_steps = [
                 "Upload the Bunnings spreadsheet.",
                 "Upload the raw forecast dataset.",
-                "Review WOH status and export the filtered output.",
+                "Review WOH, confidence, and export the filtered output.",
             ]
         else:
             workflow_steps = [
                 "Upload the inventory export.",
                 "Optionally upload a forecast dataset.",
-                "Tune filters and review the resulting order list.",
+                "Use a review preset, validate the output, then export the list you need.",
             ]
 
         workflow_html = "".join(f"<li>{step}</li>" for step in workflow_steps)
@@ -1148,13 +1202,15 @@ def render_inventory_mode(worksheet_type: str) -> None:
         inventory_df = clean_inventory_data_cached(inventory_bytes, inventory_name)
 
     forecast_df = None
+    forecast_detail = None
     forecast_loaded = False
     forecast_mode = "Static worksheet averages"
+    month_cols = []
 
     if forecast_file is not None:
         forecast_bytes, forecast_name = get_uploaded_file_bytes(forecast_file)
         with st.spinner("Loading forecasting file..."):
-            forecast_df = load_forecast_history_cached(forecast_bytes, forecast_name)
+            forecast_df, forecast_detail, month_cols = load_forecast_history_cached(forecast_bytes, forecast_name)
         forecast_loaded = True
         forecast_mode = "Forecast dataset"
 
@@ -1169,13 +1225,46 @@ def render_inventory_mode(worksheet_type: str) -> None:
     main_filter_col, main_filter_label = get_filter_config(worksheet_type)
 
     st.sidebar.markdown("---")
-    st.sidebar.header("Ordering Settings")
+    st.sidebar.header("Review Settings")
 
+    review_preset = st.sidebar.selectbox("Review Preset", REVIEW_PRESETS, index=0)
     table_view = st.sidebar.radio("Table View", ["Simple", "Detailed"], index=0)
     months_target = st.sidebar.number_input("Months Target", min_value=1, value=6)
-    only_need_order = st.sidebar.checkbox("Only items needing order", value=True)
+
+    if review_preset == "Balanced Review":
+        only_need_order_default = True
+        exclude_nla_default = True
+        only_allocated_default = False
+        only_below_min_default = False
+    elif review_preset == "Urgent Buy Review":
+        only_need_order_default = True
+        exclude_nla_default = True
+        only_allocated_default = True
+        only_below_min_default = False
+    elif review_preset == "Allocated Pressure Review":
+        only_need_order_default = False
+        exclude_nla_default = True
+        only_allocated_default = True
+        only_below_min_default = False
+    elif review_preset == "Supplier Order Review":
+        only_need_order_default = True
+        exclude_nla_default = True
+        only_allocated_default = False
+        only_below_min_default = False
+    elif review_preset == "Low Noise Review":
+        only_need_order_default = True
+        exclude_nla_default = True
+        only_allocated_default = False
+        only_below_min_default = True
+    else:
+        only_need_order_default = False
+        exclude_nla_default = False
+        only_allocated_default = False
+        only_below_min_default = False
+
+    only_need_order = st.sidebar.checkbox("Only items needing order", value=only_need_order_default)
     use_eoq_rounding = st.sidebar.checkbox("Round order up to EOQ", value=False)
-    exclude_nla = st.sidebar.checkbox("Exclude NLA parts", value=True)
+    exclude_nla = st.sidebar.checkbox("Exclude NLA parts", value=exclude_nla_default)
 
     st.sidebar.markdown("### Cleanup Filters")
     hide_ref_descriptions = st.sidebar.checkbox("Hide superseded/obsolete parts", value=True)
@@ -1208,7 +1297,8 @@ def render_inventory_mode(worksheet_type: str) -> None:
     else:
         demand_basis = st.sidebar.selectbox("Demand Basis", ["6mAvg", "12mAvg"])
 
-    month_cols = get_forecast_month_columns_newest_first(df.columns)
+    if not month_cols:
+        month_cols = get_forecast_month_columns_newest_first(df.columns)
 
     df = apply_inventory_calculations(
         df=df,
@@ -1220,6 +1310,13 @@ def render_inventory_mode(worksheet_type: str) -> None:
         month_cols=month_cols,
     )
 
+    top_left, top_right = st.columns([1.2, 1])
+    with top_left:
+        st.caption(f"Forecast Mode: {forecast_mode} | Demand Basis: {demand_basis} | Review Preset: {review_preset}")
+    with top_right:
+        noisy_rows = int((df["Data Quality Score"] > 0).sum()) if "Data Quality Score" in df.columns else 0
+        st.caption(f"Rows with quality flags: {noisy_rows:,}")
+
     col1, col2, col3, col4, col5 = st.columns([2, 2, 1.5, 1, 1])
 
     main_filter_values = sorted(
@@ -1228,19 +1325,29 @@ def render_inventory_mode(worksheet_type: str) -> None:
     selected_main_filters = col1.multiselect(main_filter_label, main_filter_values)
 
     priorities = sorted(df["Priority V2"].dropna().unique().tolist())
-    selected_priorities = col2.multiselect("Priority", priorities, default=priorities)
+    if review_preset == "Urgent Buy Review":
+        default_priorities = ["🔴 URGENT", "🟡 REPLENISH"] if "🟡 REPLENISH" in priorities else priorities
+    elif review_preset == "Allocated Pressure Review":
+        default_priorities = priorities
+    elif review_preset == "Low Noise Review":
+        default_priorities = ["🔴 URGENT", "🟡 REPLENISH"] if "🟡 REPLENISH" in priorities else priorities
+    else:
+        default_priorities = priorities
+
+    selected_priorities = col2.multiselect("Priority", priorities, default=default_priorities)
 
     location_values = sorted(
         [str(x).strip() for x in df["Loc"].dropna().unique().tolist() if str(x).strip() != ""]
     )
-
     default_location = ["10"] if worksheet_type == "MTD" and "10" in location_values else []
-
     selected_locations = col3.multiselect("Location", location_values, default=default_location)
-    only_below_min = col4.checkbox("Only below min", value=False)
-    only_allocated = col5.checkbox("Only allocated > 0", value=False)
+    only_below_min = col4.checkbox("Only below min", value=only_below_min_default)
+    only_allocated = col5.checkbox("Only allocated > 0", value=only_allocated_default)
 
     text_search = st.text_input("Search part number or description")
+    show_only_quality_issues = st.checkbox("Only rows with data quality flags", value=False)
+    show_only_with_demand = st.checkbox("Only rows with positive demand", value=(review_preset != "All Rows"))
+    confidence_filter = st.multiselect("Confidence", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
 
     filtered = apply_inventory_filters(
         df=df,
@@ -1263,6 +1370,15 @@ def render_inventory_mode(worksheet_type: str) -> None:
         show_poxcc_only=show_poxcc_only,
     )
 
+    if show_only_quality_issues:
+        filtered = filtered[filtered["Data Quality Score"] > 0]
+
+    if show_only_with_demand:
+        filtered = filtered[filtered["Demand_Per_Month_Used"] > 0]
+
+    if confidence_filter:
+        filtered = filtered[filtered["Confidence"].isin(confidence_filter)]
+
     sort_options = [
         "Recommended Order",
         "Base Recommended Order",
@@ -1278,6 +1394,8 @@ def render_inventory_mode(worksheet_type: str) -> None:
         "Qty on Order",
         "Available",
         "Available Now",
+        "Cover_Months_After_PO",
+        "Data Quality Score",
         "6mUsage",
         "12mUsage",
         "Forecast_Weighted_6m",
@@ -1290,24 +1408,21 @@ def render_inventory_mode(worksheet_type: str) -> None:
     if not filtered.empty and sort_col:
         filtered = filtered.sort_values(sort_col, ascending=not sort_desc)
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
     k1.metric("Rows shown", f"{len(filtered):,}")
     k2.metric("Allocated units", f"{int(filtered['Qty Allocated'].sum()) if not filtered.empty else 0:,}")
     k3.metric("Units to Order", f"{int(filtered['Recommended Order'].sum()) if not filtered.empty else 0:,}")
-    k4.metric(
-        "Urgent items",
-        f"{int((filtered['Priority V2'] == '🔴 URGENT').sum()) if not filtered.empty else 0:,}",
-    )
+    k4.metric("Urgent items", f"{int((filtered['Priority V2'] == '🔴 URGENT').sum()) if not filtered.empty else 0:,}")
     matched_count = int(df["Forecast Matched?"].sum()) if "Forecast Matched?" in df.columns else 0
     k5.metric("Forecast matches", f"{matched_count:,}")
+    k6.metric("Flagged rows", f"{int((filtered['Data Quality Score'] > 0).sum()) if not filtered.empty else 0:,}")
 
-    if forecast_loaded and demand_basis == "Custom Forecast Average":
-        st.caption(
-            f"Forecast Mode: {forecast_mode} | Demand Basis: {demand_basis} | "
-            f"Forecast Months: {custom_forecast_months} | View: {table_view}"
-        )
-    else:
-        st.caption(f"Forecast Mode: {forecast_mode} | Demand Basis: {demand_basis} | View: {table_view}")
+    supplier_summary = build_supplier_summary(filtered, main_filter_col)
+    with st.expander("Supplier / Group Summary", expanded=False):
+        if supplier_summary.empty:
+            st.info("No grouped summary available for the current filters.")
+        else:
+            st.dataframe(supplier_summary, use_container_width=True, hide_index=True)
 
     if worksheet_type == "MTD":
         simple_review_columns = [
@@ -1322,6 +1437,8 @@ def render_inventory_mode(worksheet_type: str) -> None:
             "Net After POs",
             "Recommended Order",
             "Priority V2",
+            "Decision Summary",
+            "Confidence",
         ]
     else:
         simple_review_columns = [
@@ -1335,6 +1452,8 @@ def render_inventory_mode(worksheet_type: str) -> None:
             "Net After POs",
             "Recommended Order",
             "Priority V2",
+            "Decision Summary",
+            "Confidence",
         ]
 
     simple_review_columns = [c for c in simple_review_columns if c in filtered.columns]
@@ -1353,6 +1472,7 @@ def render_inventory_mode(worksheet_type: str) -> None:
         "Min",
         "Effective Min",
         "Max",
+        "Demand_Source",
         "Demand_Per_Month_Used",
         "Forecast Average",
         "Forecast Months Used",
@@ -1360,11 +1480,18 @@ def render_inventory_mode(worksheet_type: str) -> None:
         "Base Recommended Order",
         "Recommended Order",
         "EOQ",
+        "Cover_Months_After_PO",
+        "Shortage to Min",
+        "Shortage to Max",
         "6mAvg",
         "6mUsage",
         "12mAvg",
         "12mUsage",
         "Priority V2",
+        "Decision Summary",
+        "Decision Reason",
+        "Data Quality Flags",
+        "Confidence",
         "Forecast Matched?",
     ]
     detailed_review_columns = [c for c in detailed_review_columns if c in filtered.columns]
@@ -1394,19 +1521,52 @@ def render_inventory_mode(worksheet_type: str) -> None:
 
     selected_rows = edited_table[edited_table["View"] == True]
 
+    selected_part_number = None
     if not selected_rows.empty:
         selected_row = selected_rows.iloc[0].copy()
-
         if "Priority" in selected_row.index and "Priority V2" not in selected_row.index:
             selected_row["Priority V2"] = selected_row["Priority"]
-
+        selected_part_number = selected_row.get("Part_Number")
         show_part_details_dialog(selected_row, demand_basis)
 
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+    with st.expander("Demand Trend Preview", expanded=False):
+        if forecast_loaded and forecast_detail is not None and not forecast_detail.empty:
+            available_parts = filtered["Part_Number"].dropna().astype(str).unique().tolist()
+            available_parts = sorted([p for p in available_parts if p.strip() != ""])
+            default_part = selected_part_number if selected_part_number in available_parts else (available_parts[0] if available_parts else None)
+
+            if default_part is None:
+                st.info("No filtered parts available for trend preview.")
+            else:
+                chart_part = st.selectbox("Select part for trend preview", available_parts, index=available_parts.index(default_part), key="selected_part_for_chart")
+                chart_rows = forecast_detail[forecast_detail["Part_Number"] == chart_part].copy()
+
+                if chart_rows.empty:
+                    st.info("No forecast history found for the selected part.")
+                else:
+                    trend = chart_rows[month_cols].sum(axis=0)
+                    trend_df = pd.DataFrame(
+                        {
+                            "Month": list(reversed(month_cols)),
+                            "Usage": list(reversed(trend.values.tolist())),
+                        }
+                    )
+                    st.line_chart(trend_df.set_index("Month"))
+                    st.caption(f"Trend preview for {chart_part}. Left side is older months; right side is the most recent month from the forecast export.")
+        else:
+            st.info("Upload a forecast file to enable trend preview.")
+
+    export_type = st.selectbox(
+        "Export Type",
+        ["Full Detailed Export", "Buyer Review", "Supplier PO Prep", "Exception Report"],
+        index=1,
+    )
+    export_df, export_name = build_inventory_export(filtered, export_type)
+    export_csv = export_df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "Download Order CSV",
-        data=csv_bytes,
-        file_name="order_list.csv",
+        f"Download {export_type} CSV",
+        data=export_csv,
+        file_name=export_name,
         mime="text/csv",
     )
 
@@ -1424,7 +1584,7 @@ def render_inventory_mode(worksheet_type: str) -> None:
             st.write("Forecast Columns Found:")
             st.write(list(forecast_df.columns))
             st.write("Forecast month order used (newest first):")
-            st.write(get_forecast_month_columns_newest_first(forecast_df.columns))
+            st.write(month_cols)
 
 
 # =========================================================
@@ -1467,7 +1627,7 @@ def render_bunnings_mode() -> None:
         bunnings_df = clean_bunnings_file_cached(bunnings_bytes, bunnings_name)
 
     with st.spinner("Loading forecasting data..."):
-        bunnings_forecast_df = load_bunnings_forecast_by_loc_cached(forecast_bytes, forecast_name)
+        bunnings_forecast_df, bunnings_forecast_detail, bunnings_month_cols = load_bunnings_forecast_by_loc_cached(forecast_bytes, forecast_name)
 
     with st.spinner("Calculating Weeks on Hand..."):
         bunnings_view_df = build_bunnings_woh_estimate(bunnings_df, bunnings_forecast_df)
@@ -1477,6 +1637,8 @@ def render_bunnings_mode() -> None:
 
     show_only_matched_loc = st.checkbox("Only show rows with recognised VU / PV location mapping", value=False)
     show_only_active = st.checkbox("Only show non-empty status rows", value=False)
+    only_quality_issues = st.checkbox("Only rows with quality flags", value=False)
+    usage_confidence_filter = st.multiselect("Usage Confidence", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
     bunnings_search = st.text_input("Search Bunnings SKU / Steelfort SKU / description", key="bunnings_search_direct")
 
     filtered = bunnings_view_df.copy()
@@ -1489,6 +1651,12 @@ def render_bunnings_mode() -> None:
 
     if show_only_active:
         filtered = filtered[filtered["Status"].astype(str).str.strip() != ""]
+
+    if only_quality_issues:
+        filtered = filtered[filtered["Data Quality Flags"] != "Clean"]
+
+    if usage_confidence_filter:
+        filtered = filtered[filtered["Usage_Confidence"].isin(usage_confidence_filter)]
 
     if bunnings_search:
         q = bunnings_search.strip().lower()
@@ -1505,18 +1673,16 @@ def render_bunnings_mode() -> None:
         na_position="last",
     )
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Rows shown", f"{len(filtered):,}")
     m2.metric("Urgent items", f"{int((filtered['Bunnings_Status'] == '🔴 URGENT').sum()):,}")
     m3.metric("Risk items", f"{int((filtered['Bunnings_Status'] == '🟠 RISK').sum()):,}")
     m4.metric(
         "Avg WOH",
-        (
-            f"{filtered['Weeks_on_Hand'].replace([np.inf, -np.inf], np.nan).mean():.2f}"
-            if filtered["Weeks_on_Hand"].notna().any()
-            else "0.00"
-        ),
+        f"{filtered['Weeks_on_Hand'].replace([np.inf, -np.inf], np.nan).mean():.2f}"
+        if filtered["Weeks_on_Hand"].notna().any() else "0.00"
     )
+    m5.metric("Fallback rows", f"{int((filtered['Usage_Source'] == 'CY24 Sales Fallback').sum()):,}")
 
     display_columns = [
         "Bunnings_Item_Number",
@@ -1524,6 +1690,7 @@ def render_bunnings_mode() -> None:
         "Steelfort_Sku",
         "Match_Part",
         "Forecast_Loc",
+        "Location_Match",
         "Item_Description",
         "Status",
         "CY24_Sales",
@@ -1538,16 +1705,53 @@ def render_bunnings_mode() -> None:
         "Bunnings_Status",
         "Recommended_Order_4W",
         "Usage_Source",
+        "Usage_Confidence",
+        "Data Quality Flags",
     ]
     display_columns = [c for c in display_columns if c in filtered.columns]
 
     st.dataframe(filtered[display_columns], use_container_width=True, hide_index=True)
 
-    export_csv = filtered.to_csv(index=False).encode("utf-8")
+    with st.expander("Bunnings Trend Preview", expanded=False):
+        available_parts = filtered["Match_Part"].dropna().astype(str).unique().tolist()
+        available_parts = sorted([p for p in available_parts if p.strip() != ""])
+        if available_parts:
+            selected_part = st.selectbox("Select part for Bunnings trend preview", available_parts, index=0)
+            chart_rows = bunnings_forecast_detail[bunnings_forecast_detail["Match_Part"] == selected_part].copy()
+            if chart_rows.empty:
+                st.info("No forecast history found for the selected part.")
+            else:
+                trend = chart_rows[bunnings_month_cols].sum(axis=0)
+                trend_df = pd.DataFrame(
+                    {
+                        "Month": list(reversed(bunnings_month_cols)),
+                        "Usage": list(reversed(trend.values.tolist())),
+                    }
+                )
+                st.line_chart(trend_df.set_index("Month"))
+        else:
+            st.info("No filtered parts available for trend preview.")
+
+    export_variant = st.selectbox(
+        "Export Type",
+        ["Full Bunnings Export", "Bunnings Exception Report"],
+        index=1,
+    )
+    if export_variant == "Bunnings Exception Report":
+        export_df = filtered[
+            (filtered["Bunnings_Status"].isin(["🔴 URGENT", "🟠 RISK"]))
+            | (filtered["Data Quality Flags"] != "Clean")
+        ].copy()
+        export_name = "bunnings_exception_report.csv"
+    else:
+        export_df = filtered.copy()
+        export_name = "bunnings_weeks_on_hand.csv"
+
+    export_csv = export_df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "Download Bunnings WOH CSV",
+        f"Download {export_variant} CSV",
         data=export_csv,
-        file_name="bunnings_weeks_on_hand.csv",
+        file_name=export_name,
         mime="text/csv",
     )
 
