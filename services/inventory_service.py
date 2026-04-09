@@ -87,6 +87,34 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
+    # ---------------------------------------------------------
+    # Roll stock figures up across ALL locations by part number
+    # so the existing Qty on hand / Qty on Order / Qty Allocated
+    # logic works off total company stock, not per-location rows.
+    # ---------------------------------------------------------
+    
+    part_totals = df.groupby("Part_Number", dropna=False).agg({
+        "Qty on hand": "sum",
+        "Qty Allocated": "sum",
+        "Qty on Order": "sum",
+    }).rename(columns={
+        "Qty on hand": "_Total_Qty_on_hand",
+        "Qty Allocated": "_Total_Qty_Allocated",
+        "Qty on Order": "_Total_Qty_on_Order",
+    })
+
+    df = df.merge(part_totals, on="Part_Number", how="left")
+
+    df["Qty on hand"] = df["_Total_Qty_on_hand"]
+    df["Qty Allocated"] = df["_Total_Qty_Allocated"]
+    df["Qty on Order"] = df["_Total_Qty_on_Order"]
+
+    df = df.drop(columns=[
+        "_Total_Qty_on_hand",
+        "_Total_Qty_Allocated",
+        "_Total_Qty_on_Order",
+    ])
+
     df["Months on Hand Numeric"] = pd.to_numeric(
         df["Months on Hand"].replace("#DIV/0!", pd.NA),
         errors="coerce"
