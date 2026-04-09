@@ -48,13 +48,18 @@ def render_inventory_mode(worksheet_type: str) -> None:
         inventory_df = clean_inventory_data_cached(inventory_bytes, inventory_name)
 
     forecast_df = None
+    forecast_detail = None
     forecast_loaded = False
     forecast_mode = "Static worksheet averages"
-
+    month_cols = []
+    
     if forecast_file is not None:
         forecast_bytes, forecast_name = get_uploaded_file_bytes(forecast_file)
         with st.spinner("Loading forecasting file..."):
-            forecast_df = load_forecast_history_cached(forecast_bytes, forecast_name)
+            forecast_df, forecast_detail, month_cols = load_forecast_history_cached(
+                forecast_bytes,
+                forecast_name,
+            )
         forecast_loaded = True
         forecast_mode = "Forecast dataset"
 
