@@ -258,6 +258,7 @@ def render_inventory_mode(worksheet_type: str) -> None:
     )
 
     selected_rows = edited_table[edited_table["View"] == True]
+    selected_part_number = None
 
     if not selected_rows.empty:
         selected_row = selected_rows.iloc[0].copy()
@@ -265,7 +266,15 @@ def render_inventory_mode(worksheet_type: str) -> None:
         if "Priority" in selected_row.index and "Priority V2" not in selected_row.index:
             selected_row["Priority V2"] = selected_row["Priority"]
 
+        selected_part_number = selected_row.get("Part_Number")
         show_part_details_dialog(selected_row, demand_basis)
+
+    render_demand_trend_preview(
+        filtered_df=filtered,
+        forecast_detail=forecast_detail,
+        month_cols=month_cols,
+        selected_part_number=selected_part_number,
+    )
 
     csv_bytes = filtered.to_csv(index=False).encode("utf-8")
     st.download_button(
