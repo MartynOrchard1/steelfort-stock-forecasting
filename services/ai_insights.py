@@ -107,7 +107,12 @@ Be concise, direct, and practical - this is read by a purchasing person deciding
 report for executives. Use plain language, short paragraphs or a tight bullet list, no fluff. When asked for a \
 summary, lead with the most urgent/actionable items. When asked to spot anomalies, look for things like: a \
 single supplier with an unusually high share of urgent items, backorders far larger than everything else, or \
-categories that stand out. If the data doesn't support an answer, say so rather than guessing."""
+categories that stand out. If the data doesn't support an answer, say so rather than guessing.
+
+Keep your ENTIRE response under about 400 words, even when the data is large or there's a lot you could say. \
+Prioritise the highest-impact points over completeness - a short, useful answer beats a long one that gets cut \
+off. If there's more worth flagging than fits, say so explicitly (e.g. "there are N more suppliers with smaller \
+issues - ask if you want the full list") rather than trying to cram everything in."""
 
 
 def get_client():
@@ -156,10 +161,13 @@ def ask_ai(data_summary: str, conversation: list[dict], user_message: str) -> st
     try:
         response = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=1600,
             system=SYSTEM_PROMPT,
             messages=messages,
         )
-        return "".join(block.text for block in response.content if hasattr(block, "text"))
+        text = "".join(block.text for block in response.content if hasattr(block, "text"))
+        if response.stop_reason == "max_tokens":
+            text += "\n\n*(Cut off - hit the response length limit. Ask a narrower question, e.g. about one supplier or category, for a complete answer.)*"
+        return text
     except Exception as e:
         return f"AI request failed: {e}"
