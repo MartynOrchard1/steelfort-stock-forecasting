@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+
+# Real business data - never commit actual exports/reports, even to a
+# private repo. Only source code should live in git.
+*.csv
+*.xlsx
+*.xls
+Steelfort_Reorder_List.xlsx
