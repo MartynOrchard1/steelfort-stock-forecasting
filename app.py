@@ -1,6 +1,7 @@
 import streamlit as st
 
 from config import APP_TITLE, APP_CAPTION, APP_MODES
+from ui.auth import require_login, render_logout_button
 from ui.bunnings_view import render_bunnings_mode
 from ui.inventory_view import render_inventory_mode
 
@@ -17,10 +18,13 @@ def main() -> None:
     """
     st.set_page_config(page_title=APP_TITLE, layout="wide")
 
+    require_login()
+
     st.title(APP_TITLE)
     st.caption(APP_CAPTION)
 
     mode = st.sidebar.radio("Mode", APP_MODES)
+    render_logout_button()
 
     if mode == "Bunnings":
         render_bunnings_mode()
