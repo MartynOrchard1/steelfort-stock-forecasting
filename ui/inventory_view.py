@@ -13,6 +13,7 @@ from services.inventory_service import (
 )
 from services.spring_forecast_service import classify_spring_product_line
 from services.backorder_service import load_backorder_report_cached
+from ui.ai_insights_view import render_ai_insights
 from ui.dialogs import show_part_details_dialog
 from utils.helpers import (
     get_forecast_month_columns_newest_first,
@@ -371,6 +372,9 @@ def render_inventory_mode() -> None:
         file_name="order_list.csv",
         mime="text/csv",
     )
+
+    st.divider()
+    render_ai_insights(filtered)
 
     with st.expander("Detected file structure"):
         st.write("Main Filter Column:", main_filter_col)
