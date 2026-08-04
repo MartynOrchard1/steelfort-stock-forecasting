@@ -161,7 +161,7 @@ def ask_ai(data_summary: str, conversation: list[dict], user_message: str) -> st
     try:
         response = client.messages.create(
             model=MODEL,
-            max_tokens=1600,
+            max_tokens=10000,
             system=SYSTEM_PROMPT,
             messages=messages,
         )
