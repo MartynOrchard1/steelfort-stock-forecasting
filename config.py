@@ -30,3 +30,13 @@ HEADER_MARKERS = {
     "Bunnings Item Number",
     "Item Description",
 }
+
+# Some parts don't carry a supplier in the NetSuite export, but their part
+# number prefix reliably identifies the supplier. Used as a fallback only -
+# it fills in a supplier when one is missing, it never overrides a supplier
+# that's already present in the source data.
+PART_PREFIX_SUPPLIER_MAP = {
+    "PV": "ROY040",
+    "MT": "MTD021",
+    "HU": "MTD021",
+}

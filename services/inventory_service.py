@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from config import PART_PREFIX_SUPPLIER_MAP
 from services.file_loader import load_file_from_bytes
 from utils.helpers import normalize_part_number
 
@@ -96,6 +97,15 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
 
     df["Description"] = df["Description"].astype(str).replace("nan", "")
     df["POREF_SUPP"] = df["POREF_SUPP"].astype("string").fillna("").str.strip()
+
+    # Fill in supplier from the part number prefix when the source data
+    # didn't provide one (e.g. PV/MT/HU parts). Never overrides a supplier
+    # that's already present.
+    missing_supplier = df["POREF_SUPP"] == ""
+    if missing_supplier.any():
+        prefix = df["Part_Number"].str[:2]
+        df.loc[missing_supplier, "POREF_SUPP"] = prefix[missing_supplier].map(PART_PREFIX_SUPPLIER_MAP).fillna("")
+
     df["Type"] = df["Type"].astype("string").fillna("").str.strip()
     df["Loc"] = df["Loc"].astype(str).replace("nan", "")
     df["Status"] = df["Status"].astype(str).replace("nan", "")
