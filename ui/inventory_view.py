@@ -13,6 +13,10 @@ from services.inventory_service import (
 )
 from services.spring_forecast_service import classify_spring_product_line
 from services.backorder_service import load_backorder_report_cached
+from services.netsuite_sales_service import (
+    MIN_EXPECTED_SALES_HISTORY_DAYS,
+    load_netsuite_sales_history_cached,
+)
 from ui.ai_insights_view import render_ai_insights
 from ui.dialogs import show_part_details_dialog
 from utils.helpers import (
@@ -44,6 +48,15 @@ def render_inventory_mode() -> None:
         "since stock movement history wasn't carried over into NetSuite)",
         type=["csv", "xlsx", "xls"],
         key="forecast_file",
+    )
+
+    netsuite_sales_file = st.file_uploader(
+        "Upload NetSuite Sales History CSV (optional - new NetSuite-native sales-by-"
+        "part/location export. Currently a flat total per part rather than a monthly "
+        "breakdown, so it's shown for reference alongside the legacy forecast rather "
+        "than driving Recommended Order yet)",
+        type=["csv"],
+        key="netsuite_sales_file",
     )
 
     backorder_file = st.file_uploader(
@@ -79,8 +92,33 @@ def render_inventory_mode() -> None:
         forecast_loaded = True
         forecast_mode = "Forecast dataset (legacy - not yet available in NetSuite)"
 
+    netsuite_sales_loaded = False
+    netsuite_sales_grouped = None
+    netsuite_sales_rows = 0
+    netsuite_sales_date_span_days = 0
+
+    if netsuite_sales_file is not None:
+        ns_bytes, ns_name = get_uploaded_file_bytes(netsuite_sales_file)
+        with st.spinner("Loading NetSuite sales history..."):
+            _, netsuite_sales_grouped, netsuite_sales_date_span_days = load_netsuite_sales_history_cached(
+                ns_bytes, ns_name,
+            )
+        netsuite_sales_loaded = True
+        netsuite_sales_rows = len(netsuite_sales_grouped)
+
+        if netsuite_sales_date_span_days < MIN_EXPECTED_SALES_HISTORY_DAYS:
+            st.warning(
+                f"NetSuite Sales History only spans {netsuite_sales_date_span_days} day(s) "
+                "of transactions - the saved search's Date filter likely isn't set to the "
+                "last 24 months yet. Treat the NetSuite Qty Sold / Revenue Sold columns as "
+                "provisional until that's fixed."
+            )
+
     with st.spinner("Preparing final dataset..."):
         df = merge_inventory_and_forecast(inventory_df, forecast_df)
+
+        if netsuite_sales_loaded and netsuite_sales_grouped is not None and not netsuite_sales_grouped.empty:
+            df = df.merge(netsuite_sales_grouped, on="Part_Number", how="left")
 
     if forecast_loaded and "Forecast_3m_Avg" in df.columns:
         df["Forecast Matched?"] = df["Forecast_3m_Avg"].notna()
@@ -319,7 +357,8 @@ def render_inventory_mode() -> None:
         "Effective Min", "Max", "Demand_Per_Month_Used", "Forecast Average",
         "Forecast Months Used", "Target Stock", "Base Recommended Order",
         "Recommended Order", "EOQ", "6mAvg", "6mUsage", "12mAvg", "12mUsage",
-        "Back Ordered", "Backorder Customers", "Priority V2", "Forecast Matched?"
+        "Back Ordered", "Backorder Customers", "Priority V2", "Forecast Matched?",
+        "NetSuite Qty Sold", "NetSuite Revenue Sold", "NetSuite Last Sale Date",
     ]
     detailed_review_columns = [c for c in detailed_review_columns if c in filtered.columns]
 
@@ -391,3 +430,7 @@ def render_inventory_mode() -> None:
             st.write(list(forecast_df.columns))
             st.write("Forecast month order used (newest first):")
             st.write(get_forecast_month_columns_newest_first(forecast_df.columns))
+
+        if netsuite_sales_loaded:
+            st.write("NetSuite Sales History Parts Loaded:", netsuite_sales_rows)
+            st.write("NetSuite Sales History Date Span (days):", netsuite_sales_date_span_days)
