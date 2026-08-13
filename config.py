@@ -6,17 +6,17 @@ all over the project.
 """
 
 APP_TITLE = "Steelfort Stock Forecasting"
-APP_CAPTION = "Version 9.0.0 - Spare Parts and Units split into dedicated ordering modes"
+APP_CAPTION = "Version 10.0.0 - Added POC Check (Cutting Edge manufacture vs purchase)"
 
 # NetSuite gives one combined saved search covering all parts, so there's no
 # more need to pick a worksheet "shape" up front (Power Parts / All Parts /
 # MTD were all just different TIMS export formats). "Inventory" was renamed
-# to "Spare Parts Ordering" to make room for "Units Ordering" - the same
-# NetSuite saved-search shapes, but scoped to whole units (mowers, chippers,
-# etc.) instead of spare parts, with their own reorder logic. Bunnings stays
-# separate because it's a genuinely different data source (from Bunnings,
-# not NetSuite).
-APP_MODES = ["Spare Parts Ordering", "Units Ordering", "Bunnings"]
+# to "Spare Parts Ordering" to make room for "Units Ordering" and
+# "POC Check" - all three share the same NetSuite saved-search shapes, just
+# scoped differently (spare parts / whole units / Cutting Edge parts) with
+# their own reorder logic. Bunnings stays separate because it's a genuinely
+# different data source (from Bunnings, not NetSuite).
+APP_MODES = ["Spare Parts Ordering", "Units Ordering", "POC Check", "Bunnings"]
 
 HEADER_MARKERS = {
     "POREF_PART",
