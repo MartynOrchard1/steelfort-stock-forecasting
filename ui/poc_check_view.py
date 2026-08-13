@@ -76,8 +76,8 @@ def _filter_common(
     return filtered
 
 
-def _category_metrics(filtered: pd.DataFrame, recommended_order_col: str) -> None:
-    k1, k2, k3, k4 = st.columns(4)
+def _category_metrics(filtered: pd.DataFrame, recommended_order_col: str):
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Rows shown", f"{len(filtered):,}")
 
     if not filtered.empty:
@@ -93,13 +93,14 @@ def _category_metrics(filtered: pd.DataFrame, recommended_order_col: str) -> Non
 
     k2.metric("Units to Manufacture", f"{manufacture_units:,}")
     k3.metric("Units to Purchase", f"{purchase_units:,}")
-    return k4
+    return k4, k5
 
 
 def _render_demand_forecast_tab(
     df: pd.DataFrame,
     forecast_loaded: bool,
     month_cols: list[str],
+    backordered_loaded: bool,
 ) -> None:
     st.caption(
         "Projects monthly demand from the uploaded forecasting dataset and compares it "
@@ -150,6 +151,10 @@ def _render_demand_forecast_tab(
         month_cols=month_cols,
     )
 
+    # A backordered POC item is urgent regardless of what the stock/demand
+    # math says - real customers are waiting on it.
+    calc_df.loc[calc_df["Back Ordered"] > 0, "Priority V2"] = "🔴 URGENT"
+
     col1, col2, col3, col4 = st.columns([1.5, 2, 2, 2])
 
     category_values = [CATEGORY_MANUFACTURE, CATEGORY_PURCHASE]
@@ -199,7 +204,7 @@ def _render_demand_forecast_tab(
     )
 
     sort_options = [
-        "Recommended Order", "Target Stock", "Demand_Per_Month_Used",
+        "Back Ordered", "Recommended Order", "Target Stock", "Demand_Per_Month_Used",
         "Net After POs", "Qty on hand", "Qty on Order", "Qty Allocated",
     ]
     sort_options = [c for c in sort_options if c in filtered.columns]
@@ -210,16 +215,21 @@ def _render_demand_forecast_tab(
     if not filtered.empty:
         filtered = filtered.sort_values(sort_col, ascending=not sort_desc)
 
-    k4 = _category_metrics(filtered, "Recommended Order")
+    k4, k5 = _category_metrics(filtered, "Recommended Order")
     k4.metric(
         "Urgent items",
         f"{int((filtered['Priority V2'] == '🔴 URGENT').sum()) if not filtered.empty else 0:,}",
     )
+    if backordered_loaded:
+        k5.metric(
+            "Items backordered",
+            f"{int((filtered['Back Ordered'] > 0).sum()) if not filtered.empty else 0:,}",
+        )
 
     display_columns = [
         "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Available Now", "Net After POs",
-        "Demand_Per_Month_Used", "Target Stock", "Recommended Order", "Priority V2",
+        "Demand_Per_Month_Used", "Target Stock", "Recommended Order", "Back Ordered", "Priority V2",
     ]
     display_columns = [c for c in display_columns if c in filtered.columns]
     # Drop the base Reorder-Point-only "Priority" column (from
@@ -245,7 +255,7 @@ def _render_demand_forecast_tab(
     render_ai_insights(filtered.rename(columns={"Priority": "Priority V2"}), key_prefix="poc_forecast_")
 
 
-def _render_reorder_point_tab(df: pd.DataFrame) -> None:
+def _render_reorder_point_tab(df: pd.DataFrame, backordered_loaded: bool) -> None:
     st.caption(
         "Mirrors the Reorder Point / Preferred Stock Level logic from Spare Parts / Units "
         "Ordering - no forecast needed. Orders/builds when net stock drops below the "
@@ -270,6 +280,10 @@ def _render_reorder_point_tab(df: pd.DataFrame) -> None:
         "Urgent": "🔴 URGENT",
     }
     calc_df["Priority Display"] = calc_df["Priority"].map(priority_display_map).fillna(calc_df["Priority"])
+
+    # A backordered POC item is urgent regardless of what the Reorder
+    # Point/Preferred Stock Level math says - real customers are waiting.
+    calc_df.loc[calc_df["Back Ordered"] > 0, "Priority Display"] = "🔴 URGENT"
 
     only_need_order = st.checkbox(
         "Only items needing order", value=True, key="poc_reorder_only_need_order"
@@ -324,7 +338,7 @@ def _render_reorder_point_tab(df: pd.DataFrame) -> None:
     )
 
     sort_options = [
-        "Recommended Order", "Net After POs", "Shortage to Min", "Shortage to Max",
+        "Back Ordered", "Recommended Order", "Net After POs", "Shortage to Min", "Shortage to Max",
         "Qty on hand", "Qty on Order", "Qty Allocated", "Min", "Max",
     ]
     sort_options = [c for c in sort_options if c in filtered.columns]
@@ -335,16 +349,21 @@ def _render_reorder_point_tab(df: pd.DataFrame) -> None:
     if not filtered.empty:
         filtered = filtered.sort_values(sort_col, ascending=not sort_desc)
 
-    k4 = _category_metrics(filtered, "Recommended Order")
+    k4, k5 = _category_metrics(filtered, "Recommended Order")
     k4.metric(
         "Urgent items",
         f"{int((filtered['Priority Display'] == '🔴 URGENT').sum()) if not filtered.empty else 0:,}",
     )
+    if backordered_loaded:
+        k5.metric(
+            "Items backordered",
+            f"{int((filtered['Back Ordered'] > 0).sum()) if not filtered.empty else 0:,}",
+        )
 
     display_columns = [
         "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Net After POs",
-        "Min", "Max", "Recommended Order", "Priority Display",
+        "Min", "Max", "Recommended Order", "Back Ordered", "Priority Display",
     ]
     display_columns = [c for c in display_columns if c in filtered.columns]
     filtered_display = filtered[display_columns].rename(
@@ -423,6 +442,14 @@ def render_poc_check_mode() -> None:
 
     df = _classify_category(df)
 
+    # The POC export can carry its own flat "Back Ordered" column directly
+    # on each row (unlike Units/Spare Parts, which get backorders from a
+    # separate grouped NetSuite report) - coerce it to numeric so both tabs
+    # can force Urgent priority off it. Defaults to 0 for older exports
+    # that don't have the column yet.
+    df["Back Ordered"] = pd.to_numeric(df.get("Back Ordered", 0), errors="coerce").fillna(0)
+    backordered_loaded = bool((df["Back Ordered"] > 0).any())
+
     forecast_loaded = False
     month_cols: list[str] = []
 
@@ -442,13 +469,14 @@ def render_poc_check_mode() -> None:
     tab1, tab2 = st.tabs(["📈 Demand Forecast Check", "🎯 Reorder Point Check"])
 
     with tab1:
-        _render_demand_forecast_tab(df, forecast_loaded, month_cols)
+        _render_demand_forecast_tab(df, forecast_loaded, month_cols, backordered_loaded)
 
     with tab2:
-        _render_reorder_point_tab(df)
+        _render_reorder_point_tab(df, backordered_loaded)
 
     with st.expander("Detected file structure"):
         st.write("POC Forecast File Loaded:", forecast_loaded)
+        st.write("Back Ordered Column Found:", backordered_loaded)
         st.write("Total Rows In Upload:", total_rows)
         st.write("Non-POC Rows Excluded:", non_poc_rows)
         st.write("POC Rows Loaded:", len(df))
