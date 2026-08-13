@@ -61,6 +61,7 @@ def _filter_common(
     text_search: str,
     only_need_order: bool,
     recommended_order_col: str,
+    part_group_values: list | None = None,
 ) -> pd.DataFrame:
     filtered = df.copy()
 
@@ -69,6 +70,9 @@ def _filter_common(
 
     if location_values:
         filtered = filtered[filtered["Loc"].astype(str).str.strip().isin(location_values)]
+
+    if part_group_values and "Part Group" in filtered.columns:
+        filtered = filtered[filtered["Part Group"].astype(str).str.strip().isin(part_group_values)]
 
     if selected_priorities:
         filtered = filtered[filtered[priority_col].isin(selected_priorities)]
@@ -157,6 +161,15 @@ def _render_demand_forecast_tab(
         "Priority", priorities, default=priorities, key="units_forecast_priority"
     )
 
+    selected_part_groups = []
+    if "Part Group" in calc_df.columns:
+        part_group_values = sorted(
+            [x for x in calc_df["Part Group"].dropna().unique().tolist() if str(x).strip() != ""]
+        )
+        selected_part_groups = st.multiselect(
+            "Part Group", part_group_values, key="units_forecast_part_group"
+        )
+
     text_search = st.text_input(
         "Search part number or description", key="units_forecast_search"
     )
@@ -170,6 +183,7 @@ def _render_demand_forecast_tab(
         text_search=text_search,
         only_need_order=only_need_order,
         recommended_order_col="Recommended Order",
+        part_group_values=selected_part_groups,
     )
 
     sort_options = [
@@ -205,7 +219,7 @@ def _render_demand_forecast_tab(
         k4.metric("Forecast Matched", f"{int(filtered['Forecast Matched?'].sum()) if not filtered.empty else 0:,}")
 
     display_columns = [
-        "Part_Number", "Description", "POREF_SUPP", "Type", "Loc",
+        "Part_Number", "Description", "POREF_SUPP", "Type", "Part Group", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Available Now", "Net After POs",
         "Demand_Per_Month_Used", "Target Stock", "Recommended Order",
         "Back Ordered", "Backorder Customers", "Priority V2",
@@ -281,6 +295,15 @@ def _render_reorder_point_tab(df: pd.DataFrame, backorder_loaded: bool) -> None:
         "Priority", priorities, default=priorities, key="units_reorder_priority"
     )
 
+    selected_part_groups = []
+    if "Part Group" in calc_df.columns:
+        part_group_values = sorted(
+            [x for x in calc_df["Part Group"].dropna().unique().tolist() if str(x).strip() != ""]
+        )
+        selected_part_groups = st.multiselect(
+            "Part Group", part_group_values, key="units_reorder_part_group"
+        )
+
     text_search = st.text_input(
         "Search part number or description", key="units_reorder_search"
     )
@@ -294,6 +317,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backorder_loaded: bool) -> None:
         text_search=text_search,
         only_need_order=only_need_order,
         recommended_order_col="Recommended Order",
+        part_group_values=selected_part_groups,
     )
 
     sort_options = [
@@ -332,7 +356,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backorder_loaded: bool) -> None:
         )
 
     display_columns = [
-        "Part_Number", "Description", "POREF_SUPP", "Type", "Loc",
+        "Part_Number", "Description", "POREF_SUPP", "Type", "Part Group", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Net After POs",
         "Min", "Max", "Recommended Order",
         "Back Ordered", "Backorder Customers", "Priority Display",
