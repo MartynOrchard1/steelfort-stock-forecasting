@@ -62,6 +62,7 @@ def _filter_common(
     only_need_order: bool,
     recommended_order_col: str,
     part_group_values: list | None = None,
+    part_type_values: list | None = None,
 ) -> pd.DataFrame:
     filtered = df.copy()
 
@@ -73,6 +74,9 @@ def _filter_common(
 
     if part_group_values and "Part Group" in filtered.columns:
         filtered = filtered[filtered["Part Group"].astype(str).str.strip().isin(part_group_values)]
+
+    if part_type_values and "Part Type" in filtered.columns:
+        filtered = filtered[filtered["Part Type"].astype(str).str.strip().isin(part_type_values)]
 
     if selected_priorities:
         filtered = filtered[filtered[priority_col].isin(selected_priorities)]
@@ -88,6 +92,53 @@ def _filter_common(
         filtered = filtered[filtered[recommended_order_col] > 0]
 
     return filtered
+
+
+def _distinct_values(df: pd.DataFrame, column: str) -> list[str]:
+    """
+    Sorted non-blank distinct values for a column, or [] if it isn't present.
+
+    Column-name based (not positional), so it's unaffected by NetSuite
+    saved searches reordering their exported columns.
+    """
+    if column not in df.columns:
+        return []
+
+    return sorted(
+        {str(x).strip() for x in df[column].dropna().tolist() if str(x).strip() != ""}
+    )
+
+
+def _render_grouping_filters(df: pd.DataFrame, key_prefix: str) -> tuple[list, list]:
+    """
+    Render the Part Group / Part Type multiselects side by side and return
+    the selections.
+
+    "Part Group" (e.g. "L8 - LM 480 SERIES") and "Part Type" (e.g.
+    "LM - LM ROTARY ALLOY") are two separate NetSuite fields - Part Type
+    was added to the saved search alongside the existing Part Group, so
+    both are offered here.
+    """
+    group_col, type_col = st.columns(2)
+
+    part_group_values = _distinct_values(df, "Part Group")
+    selected_part_groups = group_col.multiselect(
+        "Part Group",
+        part_group_values,
+        key=f"{key_prefix}_part_group",
+        disabled=not part_group_values,
+    )
+
+    part_type_values = _distinct_values(df, "Part Type")
+    selected_part_types = type_col.multiselect(
+        "Part Type",
+        part_type_values,
+        key=f"{key_prefix}_part_type",
+        help="NetSuite product grouping (e.g. LM - LM ROTARY ALLOY, LP - LM PARTS).",
+        disabled=not part_type_values,
+    )
+
+    return selected_part_groups, selected_part_types
 
 
 def _render_demand_forecast_tab(
@@ -161,14 +212,9 @@ def _render_demand_forecast_tab(
         "Priority", priorities, default=priorities, key="units_forecast_priority"
     )
 
-    selected_part_groups = []
-    if "Part Group" in calc_df.columns:
-        part_group_values = sorted(
-            [x for x in calc_df["Part Group"].dropna().unique().tolist() if str(x).strip() != ""]
-        )
-        selected_part_groups = st.multiselect(
-            "Part Group", part_group_values, key="units_forecast_part_group"
-        )
+    selected_part_groups, selected_part_types = _render_grouping_filters(
+        calc_df, key_prefix="units_forecast"
+    )
 
     text_search = st.text_input(
         "Search part number or description", key="units_forecast_search"
@@ -184,6 +230,7 @@ def _render_demand_forecast_tab(
         only_need_order=only_need_order,
         recommended_order_col="Recommended Order",
         part_group_values=selected_part_groups,
+        part_type_values=selected_part_types,
     )
 
     sort_options = [
@@ -219,7 +266,7 @@ def _render_demand_forecast_tab(
         k4.metric("Forecast Matched", f"{int(filtered['Forecast Matched?'].sum()) if not filtered.empty else 0:,}")
 
     display_columns = [
-        "Part_Number", "Description", "POREF_SUPP", "Type", "Part Group", "Loc",
+        "Part_Number", "Description", "POREF_SUPP", "Type", "Part Group", "Part Type", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Available Now", "Net After POs",
         "Demand_Per_Month_Used", "Target Stock", "Recommended Order",
         "Back Ordered", "Backorder Customers", "Priority V2",
@@ -295,14 +342,9 @@ def _render_reorder_point_tab(df: pd.DataFrame, backorder_loaded: bool) -> None:
         "Priority", priorities, default=priorities, key="units_reorder_priority"
     )
 
-    selected_part_groups = []
-    if "Part Group" in calc_df.columns:
-        part_group_values = sorted(
-            [x for x in calc_df["Part Group"].dropna().unique().tolist() if str(x).strip() != ""]
-        )
-        selected_part_groups = st.multiselect(
-            "Part Group", part_group_values, key="units_reorder_part_group"
-        )
+    selected_part_groups, selected_part_types = _render_grouping_filters(
+        calc_df, key_prefix="units_reorder"
+    )
 
     text_search = st.text_input(
         "Search part number or description", key="units_reorder_search"
@@ -318,6 +360,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backorder_loaded: bool) -> None:
         only_need_order=only_need_order,
         recommended_order_col="Recommended Order",
         part_group_values=selected_part_groups,
+        part_type_values=selected_part_types,
     )
 
     sort_options = [
@@ -356,7 +399,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backorder_loaded: bool) -> None:
         )
 
     display_columns = [
-        "Part_Number", "Description", "POREF_SUPP", "Type", "Part Group", "Loc",
+        "Part_Number", "Description", "POREF_SUPP", "Type", "Part Group", "Part Type", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Net After POs",
         "Min", "Max", "Recommended Order",
         "Back Ordered", "Backorder Customers", "Priority Display",
