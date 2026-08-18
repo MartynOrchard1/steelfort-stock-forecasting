@@ -4,6 +4,7 @@ import streamlit as st
 
 from config import PART_PREFIX_SUPPLIER_MAP
 from services.file_loader import load_file_from_bytes
+from utils.filters import apply_grouping_filters
 from utils.helpers import normalize_part_number
 
 
@@ -86,6 +87,7 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
         "POREF_SUPP": "",
         "Type": "",
         "Part Type": "",
+        "Part Group": "",
         "Qty on hand": 0,
         "Qty Allocated": 0,
         "Qty Available": 0,
@@ -122,9 +124,10 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
         df.loc[missing_supplier, "POREF_SUPP"] = prefix[missing_supplier].map(PART_PREFIX_SUPPLIER_MAP).fillna("")
 
     df["Type"] = df["Type"].astype("string").fillna("").str.strip()
-    df["Part Type"] = (
-        df["Part Type"].astype("string").fillna("").str.strip().replace("nan", "")
-    )
+    for grouping_col in ("Part Type", "Part Group"):
+        df[grouping_col] = (
+            df[grouping_col].astype("string").fillna("").str.strip().replace("nan", "")
+        )
     df["Loc"] = df["Loc"].astype(str).replace("nan", "")
     df["Status"] = df["Status"].astype(str).replace("nan", "")
 
@@ -320,6 +323,7 @@ def apply_inventory_filters(
     hide_dewalt: bool = False,
     hide_miele: bool = False,
     selected_part_types: list | None = None,
+    selected_part_groups: list | None = None,
 ) -> pd.DataFrame:
     """
     Apply all table filters in one place.
@@ -329,10 +333,11 @@ def apply_inventory_filters(
     if selected_main_filters:
         filtered = filtered[filtered[main_filter_col].isin(selected_main_filters)]
 
-    if selected_part_types and "Part Type" in filtered.columns:
-        filtered = filtered[
-            filtered["Part Type"].astype(str).str.strip().isin(selected_part_types)
-        ]
+    filtered = apply_grouping_filters(
+        filtered,
+        part_group_values=selected_part_groups,
+        part_type_values=selected_part_types,
+    )
 
     if selected_locations:
         filtered = filtered[filtered["Loc"].astype(str).str.strip().isin(selected_locations)]

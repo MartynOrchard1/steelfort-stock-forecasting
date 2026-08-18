@@ -11,6 +11,7 @@ from services.inventory_service import (
     clean_inventory_data_cached,
 )
 from ui.ai_insights_view import render_ai_insights
+from ui.filters import apply_grouping_filters, render_grouping_filters
 from utils.helpers import get_forecast_month_columns_newest_first, get_uploaded_file_bytes
 
 # Same NetSuite item-export shape as Units/Spare Parts (Part_Number, Supplier,
@@ -45,6 +46,7 @@ def _filter_common(
     only_need_order: bool,
     recommended_order_col: str,
     part_group_values: list | None = None,
+    part_type_values: list | None = None,
 ) -> pd.DataFrame:
     filtered = df.copy()
 
@@ -57,8 +59,7 @@ def _filter_common(
     if location_values:
         filtered = filtered[filtered["Loc"].astype(str).str.strip().isin(location_values)]
 
-    if part_group_values and "Part Group" in filtered.columns:
-        filtered = filtered[filtered["Part Group"].astype(str).str.strip().isin(part_group_values)]
+    filtered = apply_grouping_filters(filtered, part_group_values, part_type_values)
 
     if selected_priorities:
         filtered = filtered[filtered[priority_col].isin(selected_priorities)]
@@ -177,14 +178,9 @@ def _render_demand_forecast_tab(
         "Priority", priorities, default=priorities, key="poc_forecast_priority"
     )
 
-    selected_part_groups = []
-    if "Part Group" in calc_df.columns:
-        part_group_values = sorted(
-            [x for x in calc_df["Part Group"].dropna().unique().tolist() if str(x).strip() != ""]
-        )
-        selected_part_groups = st.multiselect(
-            "Part Group", part_group_values, key="poc_forecast_part_group"
-        )
+    selected_part_groups, selected_part_types = render_grouping_filters(
+        calc_df, key_prefix="poc_forecast"
+    )
 
     text_search = st.text_input(
         "Search part number or description", key="poc_forecast_search"
@@ -201,6 +197,7 @@ def _render_demand_forecast_tab(
         only_need_order=only_need_order,
         recommended_order_col="Recommended Order",
         part_group_values=selected_part_groups,
+        part_type_values=selected_part_types,
     )
 
     sort_options = [
@@ -227,7 +224,7 @@ def _render_demand_forecast_tab(
         )
 
     display_columns = [
-        "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Loc",
+        "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Part Type", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Available Now", "Net After POs",
         "Demand_Per_Month_Used", "Target Stock", "Recommended Order", "Back Ordered", "Priority V2",
     ]
@@ -311,14 +308,9 @@ def _render_reorder_point_tab(df: pd.DataFrame, backordered_loaded: bool) -> Non
         "Priority", priorities, default=priorities, key="poc_reorder_priority"
     )
 
-    selected_part_groups = []
-    if "Part Group" in calc_df.columns:
-        part_group_values = sorted(
-            [x for x in calc_df["Part Group"].dropna().unique().tolist() if str(x).strip() != ""]
-        )
-        selected_part_groups = st.multiselect(
-            "Part Group", part_group_values, key="poc_reorder_part_group"
-        )
+    selected_part_groups, selected_part_types = render_grouping_filters(
+        calc_df, key_prefix="poc_reorder"
+    )
 
     text_search = st.text_input(
         "Search part number or description", key="poc_reorder_search"
@@ -335,6 +327,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backordered_loaded: bool) -> Non
         only_need_order=only_need_order,
         recommended_order_col="Recommended Order",
         part_group_values=selected_part_groups,
+        part_type_values=selected_part_types,
     )
 
     sort_options = [
@@ -361,7 +354,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backordered_loaded: bool) -> Non
         )
 
     display_columns = [
-        "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Loc",
+        "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Part Type", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Net After POs",
         "Min", "Max", "Recommended Order", "Back Ordered", "Priority Display",
     ]

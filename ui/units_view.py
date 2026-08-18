@@ -12,6 +12,7 @@ from services.inventory_service import (
     clean_inventory_data_cached,
 )
 from ui.ai_insights_view import render_ai_insights
+from ui.filters import apply_grouping_filters, render_grouping_filters
 from utils.helpers import get_forecast_month_columns_newest_first, get_uploaded_file_bytes
 
 # Same NetSuite saved-search shapes as Spare Parts Ordering (item export,
@@ -72,11 +73,7 @@ def _filter_common(
     if location_values:
         filtered = filtered[filtered["Loc"].astype(str).str.strip().isin(location_values)]
 
-    if part_group_values and "Part Group" in filtered.columns:
-        filtered = filtered[filtered["Part Group"].astype(str).str.strip().isin(part_group_values)]
-
-    if part_type_values and "Part Type" in filtered.columns:
-        filtered = filtered[filtered["Part Type"].astype(str).str.strip().isin(part_type_values)]
+    filtered = apply_grouping_filters(filtered, part_group_values, part_type_values)
 
     if selected_priorities:
         filtered = filtered[filtered[priority_col].isin(selected_priorities)]
@@ -92,53 +89,6 @@ def _filter_common(
         filtered = filtered[filtered[recommended_order_col] > 0]
 
     return filtered
-
-
-def _distinct_values(df: pd.DataFrame, column: str) -> list[str]:
-    """
-    Sorted non-blank distinct values for a column, or [] if it isn't present.
-
-    Column-name based (not positional), so it's unaffected by NetSuite
-    saved searches reordering their exported columns.
-    """
-    if column not in df.columns:
-        return []
-
-    return sorted(
-        {str(x).strip() for x in df[column].dropna().tolist() if str(x).strip() != ""}
-    )
-
-
-def _render_grouping_filters(df: pd.DataFrame, key_prefix: str) -> tuple[list, list]:
-    """
-    Render the Part Group / Part Type multiselects side by side and return
-    the selections.
-
-    "Part Group" (e.g. "L8 - LM 480 SERIES") and "Part Type" (e.g.
-    "LM - LM ROTARY ALLOY") are two separate NetSuite fields - Part Type
-    was added to the saved search alongside the existing Part Group, so
-    both are offered here.
-    """
-    group_col, type_col = st.columns(2)
-
-    part_group_values = _distinct_values(df, "Part Group")
-    selected_part_groups = group_col.multiselect(
-        "Part Group",
-        part_group_values,
-        key=f"{key_prefix}_part_group",
-        disabled=not part_group_values,
-    )
-
-    part_type_values = _distinct_values(df, "Part Type")
-    selected_part_types = type_col.multiselect(
-        "Part Type",
-        part_type_values,
-        key=f"{key_prefix}_part_type",
-        help="NetSuite product grouping (e.g. LM - LM ROTARY ALLOY, LP - LM PARTS).",
-        disabled=not part_type_values,
-    )
-
-    return selected_part_groups, selected_part_types
 
 
 def _render_demand_forecast_tab(
@@ -212,7 +162,7 @@ def _render_demand_forecast_tab(
         "Priority", priorities, default=priorities, key="units_forecast_priority"
     )
 
-    selected_part_groups, selected_part_types = _render_grouping_filters(
+    selected_part_groups, selected_part_types = render_grouping_filters(
         calc_df, key_prefix="units_forecast"
     )
 
@@ -342,7 +292,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backorder_loaded: bool) -> None:
         "Priority", priorities, default=priorities, key="units_reorder_priority"
     )
 
-    selected_part_groups, selected_part_types = _render_grouping_filters(
+    selected_part_groups, selected_part_types = render_grouping_filters(
         calc_df, key_prefix="units_reorder"
     )
 
