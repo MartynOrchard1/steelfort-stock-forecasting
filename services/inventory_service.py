@@ -19,6 +19,22 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
     df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed", case=False, regex=True)]
     df.columns = [str(c).replace("\n", " ").strip() for c in df.columns]
 
+    # NetSuite exports now ship BOTH a "Type" column (the record type -
+    # Assembly / Inventory Item) and a separate "Part Type" column (the
+    # product grouping - "LP - LM PARTS", "RF - REFRIGERATION PRODTS",
+    # "12 - SUNDRY" etc). Older TIMS-era exports only had "Part Type", and
+    # it meant the item type. So only fold "Part Type" into "Type" when
+    # there's no dedicated type column already - otherwise keep it as its
+    # own filterable column instead of letting the duplicate-name drop
+    # below silently throw it away.
+    has_type_col = any(str(c).strip().lower() == "type" for c in df.columns)
+    part_type_cols = [c for c in df.columns if str(c).strip().lower() == "part type"]
+
+    if part_type_cols:
+        df = df.rename(
+            columns={part_type_cols[0]: "Type" if not has_type_col else "Part Type"}
+        )
+
     rename_map = {
         "POREF_PART": "Part_Number",
         "ITMAS_PART": "Part_Number",
@@ -32,8 +48,6 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
         "Supplier": "POREF_SUPP",
         "SUPPLIER": "POREF_SUPP",
         "TYPE": "Type",
-        "Part Type": "Type",
-        "PART TYPE": "Type",
         "Qty On Hand": "Qty on hand",
         "Qty Alloc": "Qty Allocated",
         "Qty On Order": "Qty on Order",
@@ -71,6 +85,7 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
         "Description": "",
         "POREF_SUPP": "",
         "Type": "",
+        "Part Type": "",
         "Qty on hand": 0,
         "Qty Allocated": 0,
         "Qty Available": 0,
@@ -107,6 +122,9 @@ def clean_inventory_data_cached(file_bytes: bytes, file_name: str) -> pd.DataFra
         df.loc[missing_supplier, "POREF_SUPP"] = prefix[missing_supplier].map(PART_PREFIX_SUPPLIER_MAP).fillna("")
 
     df["Type"] = df["Type"].astype("string").fillna("").str.strip()
+    df["Part Type"] = (
+        df["Part Type"].astype("string").fillna("").str.strip().replace("nan", "")
+    )
     df["Loc"] = df["Loc"].astype(str).replace("nan", "")
     df["Status"] = df["Status"].astype(str).replace("nan", "")
 
@@ -301,6 +319,7 @@ def apply_inventory_filters(
     hide_factory: bool = False,
     hide_dewalt: bool = False,
     hide_miele: bool = False,
+    selected_part_types: list | None = None,
 ) -> pd.DataFrame:
     """
     Apply all table filters in one place.
@@ -309,6 +328,11 @@ def apply_inventory_filters(
 
     if selected_main_filters:
         filtered = filtered[filtered[main_filter_col].isin(selected_main_filters)]
+
+    if selected_part_types and "Part Type" in filtered.columns:
+        filtered = filtered[
+            filtered["Part Type"].astype(str).str.strip().isin(selected_part_types)
+        ]
 
     if selected_locations:
         filtered = filtered[filtered["Loc"].astype(str).str.strip().isin(selected_locations)]

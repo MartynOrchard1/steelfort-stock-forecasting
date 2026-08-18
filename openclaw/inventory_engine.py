@@ -181,6 +181,21 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed", case=False, regex=True)]
     df.columns = [str(c).replace("\n", " ").strip() for c in df.columns]
 
+    # NetSuite exports now ship BOTH a "Type" column (the record type -
+    # Assembly / Inventory Item) and a separate "Part Type" column (the
+    # product grouping - "LP - LM PARTS", "RF - REFRIGERATION PRODTS",
+    # "12 - SUNDRY" etc). Older TIMS-era exports only had "Part Type", and
+    # it meant the item type. So only fold "Part Type" into "Type" when
+    # there's no dedicated type column already - otherwise keep it as its
+    # own filterable column.
+    has_type_col = any(str(c).strip().lower() == "type" for c in df.columns)
+    part_type_cols = [c for c in df.columns if str(c).strip().lower() == "part type"]
+
+    if part_type_cols:
+        df = df.rename(
+            columns={part_type_cols[0]: "Type" if not has_type_col else "Part Type"}
+        )
+
     rename_map = {
         "POREF_PART": "Part_Number",
         "ITMAS_PART": "Part_Number",
@@ -194,8 +209,6 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
         "Supplier": "POREF_SUPP",
         "SUPPLIER": "POREF_SUPP",
         "TYPE": "Type",
-        "Part Type": "Type",
-        "PART TYPE": "Type",
         "Qty On Hand": "Qty on hand",
         "Qty Alloc": "Qty Allocated",
         "Qty On Order": "Qty on Order",
@@ -207,11 +220,17 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     }
     df = df.rename(columns=rename_map)
 
+    # Drop duplicate-named columns (e.g. exports carrying two differently
+    # sourced "Description" fields), keeping the first occurrence, so
+    # downstream .str/.astype calls don't blow up on a same-named slice.
+    df = df.loc[:, ~df.columns.duplicated()]
+
     expected_defaults = {
         "Part_Number": "",
         "Description": "",
         "POREF_SUPP": "",
         "Type": "",
+        "Part Type": "",
         "Qty on hand": 0,
         "Qty Allocated": 0,
         "Qty Available": 0,
@@ -238,6 +257,9 @@ def clean_inventory_data(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     df["Description"] = df["Description"].astype(str).replace("nan", "")
     df["POREF_SUPP"] = df["POREF_SUPP"].astype("string").fillna("").str.strip()
     df["Type"] = df["Type"].astype("string").fillna("").str.strip()
+    df["Part Type"] = (
+        df["Part Type"].astype("string").fillna("").str.strip().replace("nan", "")
+    )
     df["Loc"] = df["Loc"].astype(str).replace("nan", "")
     df["Status"] = df["Status"].astype(str).replace("nan", "")
 
@@ -388,6 +410,7 @@ def apply_inventory_logic(
     selected_main_filters: list[str] | None = None,
     selected_priorities: list[str] | None = None,
     selected_locations: list[str] | None = None,
+    selected_part_types: list[str] | None = None,
     only_below_min: bool = False,
     only_allocated: bool = False,
     text_search: str = "",
@@ -403,6 +426,7 @@ def apply_inventory_logic(
     """
     selected_main_filters = selected_main_filters or []
     selected_locations = selected_locations or []
+    selected_part_types = selected_part_types or []
 
     df = merge_inventory_and_forecast(inventory_df, forecast_df)
 
@@ -534,6 +558,11 @@ def apply_inventory_logic(
             filtered["Loc"].astype(str).str.strip().isin(selected_locations)
         ]
 
+    if selected_part_types and "Part Type" in filtered.columns:
+        filtered = filtered[
+            filtered["Part Type"].astype(str).str.strip().isin(selected_part_types)
+        ]
+
     if selected_priorities:
         filtered = filtered[filtered["Priority V2"].isin(selected_priorities)]
 
@@ -603,6 +632,7 @@ def apply_inventory_logic(
         "sort_col": sort_col,
         "sort_desc": sort_desc,
         "selected_locations": selected_locations,
+        "selected_part_types": selected_part_types,
     }
 
     return filtered, meta
@@ -621,6 +651,7 @@ def load_and_run(
     selected_main_filters: list[str] | None = None,
     selected_priorities: list[str] | None = None,
     selected_locations: list[str] | None = None,
+    selected_part_types: list[str] | None = None,
     only_below_min: bool = False,
     only_allocated: bool = False,
     text_search: str = "",
@@ -646,6 +677,7 @@ def load_and_run(
         selected_main_filters=selected_main_filters,
         selected_priorities=selected_priorities,
         selected_locations=selected_locations,
+        selected_part_types=selected_part_types,
         only_below_min=only_below_min,
         only_allocated=only_allocated,
         text_search=text_search,

@@ -266,8 +266,25 @@ def render_inventory_mode() -> None:
     only_below_min = col4.checkbox("Only below min", value=False)
     only_allocated = col5.checkbox("Only allocated > 0", value=False)
 
+    part_type_values = sorted(
+        [
+            str(x).strip()
+            for x in df.get("Part Type", pd.Series(dtype="object")).dropna().unique().tolist()
+            if str(x).strip() != ""
+        ]
+    )
+
+    pt_col, spring_col = st.columns(2)
+
+    selected_part_types = pt_col.multiselect(
+        "Part Type",
+        part_type_values,
+        help="NetSuite product grouping (e.g. LP - LM PARTS, RF - REFRIGERATION PRODTS).",
+        disabled=not part_type_values,
+    )
+
     spring_categories = sorted(df["Spring Category"].dropna().unique().tolist())
-    selected_spring_categories = st.multiselect("Spring Category", spring_categories)
+    selected_spring_categories = spring_col.multiselect("Spring Category", spring_categories)
 
     text_search = st.text_input("Search part number or description")
 
@@ -293,6 +310,7 @@ def render_inventory_mode() -> None:
         hide_factory=hide_factory,
         hide_dewalt=hide_dewalt,
         hide_miele=hide_miele,
+        selected_part_types=selected_part_types,
     )
 
     if selected_spring_categories:
@@ -344,14 +362,14 @@ def render_inventory_mode() -> None:
         st.caption(f"Forecast Mode: {forecast_mode} | Demand Basis: {demand_basis} | View: {table_view}")
 
     simple_review_columns = [
-        "Part_Number", "Description", "POREF_SUPP", "Spring Category", "Qty on hand",
+        "Part_Number", "Description", "POREF_SUPP", "Part Type", "Spring Category", "Qty on hand",
         "Qty Allocated", "Qty on Order", "Available", "Net After POs",
         "Back Ordered", "Recommended Order", "Priority V2"
     ]
     simple_review_columns = [c for c in simple_review_columns if c in filtered.columns]
 
     detailed_review_columns = [
-        "Part_Number", "Description", "POREF_SUPP", "Type", "Loc", "Spring Category",
+        "Part_Number", "Description", "POREF_SUPP", "Type", "Part Type", "Loc", "Spring Category",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Total On Order (All Locations)",
         "Available", "Net After POs", "Min",
         "Effective Min", "Max", "Demand_Per_Month_Used", "Forecast Average",
