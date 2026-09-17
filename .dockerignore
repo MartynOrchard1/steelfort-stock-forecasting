@@ -15,3 +15,8 @@ env
 *.csv
 *.xlsx
 *.xls
+
+# Real secrets - never let these end up baked into an image layer. Mounted
+# in at runtime instead (see docker-compose.yml). secrets.toml.example has
+# no real values so it's fine to leave that one in the build context.
+.streamlit/secrets.toml

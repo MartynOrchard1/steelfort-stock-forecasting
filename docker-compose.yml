@@ -1,0 +1,31 @@
+# Example: run the Steelfort Stock Forecasting app as a standalone service
+# on the network. See the project plan doc for the full rollout checklist
+# (static IP, firewall rules, intranet link).
+#
+# Usage on the server:
+#   docker compose up -d --build
+#   docker compose logs -f      # check it started cleanly
+#   docker compose ps           # confirm it's up and "healthy"
+#
+# After a code change:
+#   docker compose up -d --build
+
+services:
+  stock-app:
+    build:
+      context: .
+      dockerfile: "Dockerfile - Copy"
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      # Real secrets.toml lives only on the server, never in the image.
+      # Create it once on the server from .streamlit/secrets.toml.example.
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+
+    # Once the app is updated to read the NetSuite/TIMS MySQL view directly
+    # instead of file uploads, DB connection details go here as env vars
+    # rather than in code - e.g.:
+    #
+    # env_file:
+    #   - .env      # DB_HOST / DB_USER / DB_PASSWORD / DB_NAME - not committed
