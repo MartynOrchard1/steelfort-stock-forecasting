@@ -24,8 +24,10 @@ services:
       - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
 
     # Once the app is updated to read the NetSuite/TIMS MySQL view directly
-    # instead of file uploads, DB connection details go here as env vars
-    # rather than in code - e.g.:
+    # instead of file uploads, uncomment this - copy .env.example to .env
+    # first and fill in the real read-only DB credentials (DB_HOST,
+    # DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, DB_VIEW). .env is gitignored
+    # and dockerignored, so it never gets committed or baked into the image.
     #
     # env_file:
-    #   - .env      # DB_HOST / DB_USER / DB_PASSWORD / DB_NAME - not committed
+    #   - .env
