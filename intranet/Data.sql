@@ -33,9 +33,9 @@ SELECT
     IFNULL(IT.QOH,0) + IFNULL(IT.QOO,0) - IFNULL(IT.Qty_Backordered,0) AS Net_After_POs,
 
     -- [ADDED] Urgency banding off the net position.
-    --   < 0            -> URGENT    (committed demand exceeds stock + inbound)
-    --   < Reorder Point -> REPLENISH (covered, but below where it should sit)
-    --   else           -> OK
+    -- < 0 = URGENT (committed demand exceeds stock + inbound)
+    -- < Reorder Point = REPLENISH (covered, but below where it should sit)
+    -- else = OK
     -- The 5 is a placeholder reorder point for items that have none set.
     -- Replace with the real column if Items carries one.
     CASE
