@@ -25,7 +25,7 @@ SELECT
     Qty_Backordered,
 
     -- [ADDED] Net stock position once outstanding POs land.
-    --   on hand + on order - backordered
+    -- on hand + on order - backordered
     -- NOTE: the Streamlit app uses GREATEST(Committed, Back Ordered) here.
     -- nsexports.Items doesn't expose a Committed column, so this only
     -- subtracts Qty_Backordered. If Committed exists under another name,
