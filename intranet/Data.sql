@@ -74,7 +74,7 @@ FROM
     -- [REMOVED] the original Item_Status CASE sat here. Moved to the outer
     -- SELECT above - it needs stock columns this subquery can't see.
     -- (It also had no comparison operator, so MySQL read any non-zero
-    -- result as true and nearly everything came back 'NEEDED'.)
+    -- test resulted as true and nearly everything came back 'NEEDED'.)
 
 FROM nsexports.SalesMerge
 
