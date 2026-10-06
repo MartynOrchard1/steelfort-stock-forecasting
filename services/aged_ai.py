@@ -6,7 +6,7 @@ ever sees a compact summary or a short list of lines (never the full
 
 import difflib
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
 import numpy as np
@@ -199,18 +199,27 @@ def clearance_lines(aged_df: pd.DataFrame, reorder: pd.DataFrame | None, top_n: 
     return lines.assign(Supplier=lines["Part_Number"].map(supplier).fillna(""))[TRIAGE_COLS].round(2)
 
 
-def _parse_chunked(system: str, lines: pd.DataFrame, schema: type[BaseModel], effort: str | None = None) -> list:
-    """Send `lines` as CSV in chunks of CHUNK, up to PARALLEL requests at a time; returns every chunk's .lines."""
+def _parse_chunked(system: str, lines: pd.DataFrame, schema: type[BaseModel], effort: str | None = None,
+                   on_progress=None) -> list:
+    """
+    Send `lines` as CSV in chunks of CHUNK, up to PARALLEL requests at a time; returns every chunk's .lines.
+    on_progress(done, total) is called from this (the caller's) thread, so it can update Streamlit widgets.
+    """
     client = require_client()  # resolved once here: st.secrets isn't for worker threads
     chunks = [lines.iloc[i:i + CHUNK].to_csv(index=False) for i in range(0, len(lines), CHUNK)]
+    out = []
     with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
-        results = pool.map(lambda c: _parse(client, system, c, schema, effort).lines, chunks)
-        return [line for chunk in results for line in chunk]
+        futures = [pool.submit(_parse, client, system, c, schema, effort) for c in chunks]
+        for done, future in enumerate(as_completed(futures), 1):
+            out += future.result().lines
+            if on_progress:
+                on_progress(done, len(chunks))
+    return out
 
 
-def triage_clearance(lines: pd.DataFrame) -> pd.DataFrame:
+def triage_clearance(lines: pd.DataFrame, on_progress=None) -> pd.DataFrame:
     """Add Suggested_Action / Action_Reason to clearance_lines() output."""
-    triaged = _parse_chunked(TRIAGE_PROMPT, lines, Triage, effort="medium")
+    triaged = _parse_chunked(TRIAGE_PROMPT, lines, Triage, effort="medium", on_progress=on_progress)
     return _merge_by_part(lines, triaged, {"action": "Suggested_Action", "reason": "Action_Reason"})
 
 

@@ -55,7 +55,10 @@ def _render_triage(aged_df: pd.DataFrame, reorder_file) -> None:
         top_n = st.slider("Lines to triage (highest value first)", 50, 500, 200, 50, key="aged_triage_n")
         if st.button(f"Triage top {top_n} Clearance lines", key="aged_triage_btn"):
             lines = clearance_lines(aged_df, _read_raw(reorder_file), top_n)
-            _run(f"Triaging {len(lines)} lines", "aged_ai_triage", lambda: triage_clearance(lines))
+            bar = st.progress(0.0, text=f"Triaging {len(lines)} lines - leave the page alone until it finishes")
+            step = lambda done, total: bar.progress(done / total, text=f"Triaging {len(lines)} lines - batch {done} of {total}")
+            _run(f"Triaging {len(lines)} lines", "aged_ai_triage", lambda: triage_clearance(lines, on_progress=step))
+            bar.empty()
         result = st.session_state.get("aged_ai_triage")
         if result is not None and "Stock_Value" in result:
             st.dataframe(result.groupby("Suggested_Action", dropna=False)
