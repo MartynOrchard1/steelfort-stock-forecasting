@@ -1,11 +1,6 @@
-import io
-
 import numpy as np
 import pandas as pd
 import streamlit as st
-
-import aged_stock
-from services.file_loader import load_file_from_bytes
 
 from services.forecast_service import (
     load_forecast_history_cached,
@@ -22,7 +17,6 @@ from services.netsuite_sales_service import (
     MIN_EXPECTED_SALES_HISTORY_DAYS,
     load_netsuite_sales_history_cached,
 )
-from ui.aged_ai_view import render_aged_ai
 from ui.ai_insights_view import render_ai_insights
 from ui.dialogs import show_part_details_dialog
 from ui.filters import render_grouping_filters
@@ -74,41 +68,6 @@ def render_inventory_mode() -> None:
         key="backorder_file",
     )
 
-    purchasing_tab, aged_tab = st.tabs(["🛒 Purchasing", "🕰️ Aged Stock"])
-
-    # Aged Stock runs first so st.session_state["aged_df"] is current when
-    # the purchasing tab applies its DO NOT ORDER override.
-    with aged_tab:
-        try:
-            aged_stock.render(
-                load_file_from_bytes(*get_uploaded_file_bytes(inventory_file)) if inventory_file else None,
-                _as_csv(forecast_file),
-                _as_csv(netsuite_sales_file),
-            )
-        except Exception as e:  # a bad file here shouldn't take purchasing down with it
-            st.session_state.pop("aged_df", None)
-            st.error(f"Aged stock couldn't run on these files: {e}")
-
-        if "aged_df" in st.session_state:
-            render_aged_ai(
-                st.session_state["aged_df"],
-                inventory_file or st.session_state.get("aged_reorder"),
-                _as_csv(forecast_file) or _as_csv(st.session_state.get("aged_tims")),
-                _as_csv(netsuite_sales_file) or _as_csv(st.session_state.get("aged_ns")),
-            )
-
-    with purchasing_tab:
-        _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backorder_file)
-
-
-def _as_csv(uploaded_file):
-    """Fresh copy of an uploaded CSV for aged_stock to read (None for Excel / no file)."""
-    if uploaded_file is None or not uploaded_file.name.lower().endswith(".csv"):
-        return None
-    return io.BytesIO(uploaded_file.getvalue())
-
-
-def _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backorder_file) -> None:
     if not inventory_file:
         st.info("Upload your NetSuite inventory export to get started.")
         return
@@ -295,7 +254,8 @@ def _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backo
     # Aged stock feedback: Clearance parts (12+ months no movement at loc 10)
     # are never ordered, whatever the demand / backorder maths above said.
     # Base Recommended Order keeps the pre-override qty so these still show
-    # under "Only items needing order".
+    # under "Only items needing order". aged_df comes from Aged Stock mode
+    # earlier in this session.
     df["Order Reason"] = ""
     aged_df = st.session_state.get("aged_df")
     if aged_df is not None:
@@ -304,6 +264,11 @@ def _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backo
         df.loc[do_not_order, "Priority V2"] = "⛔ DO NOT ORDER"
         df.loc[do_not_order, "Recommended Order"] = 0
         df.loc[do_not_order, "Order Reason"] = "Aged stock - 12+ months no movement"
+        st.caption(f"⛔ Aged stock override on: {do_not_order.sum():,} rows set to DO NOT ORDER "
+                   "(Clearance parts from Aged Stock mode).")
+    else:
+        st.caption("Aged stock override off - run Aged Stock mode first to block Clearance parts "
+                   "(12+ months no movement) with DO NOT ORDER.")
 
     col1, col2, col3, col4, col5 = st.columns([2, 2, 1.5, 1, 1])
 

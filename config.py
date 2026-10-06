@@ -15,8 +15,9 @@ APP_CAPTION = "Version 10.0.0 - Added POC Check (Cutting Edge manufacture vs pur
 # "POC Check" - all three share the same NetSuite saved-search shapes, just
 # scoped differently (spare parts / whole units / Cutting Edge parts) with
 # their own reorder logic. Bunnings stays separate because it's a genuinely
-# different data source (from Bunnings, not NetSuite).
-APP_MODES = ["Spare Parts Ordering", "Units Ordering", "POC Check", "Bunnings"]
+# different data source (from Bunnings, not NetSuite). "Aged Stock" ages
+# location-10 stock and feeds DO NOT ORDER back into Spare Parts Ordering.
+APP_MODES = ["Spare Parts Ordering", "Aged Stock", "Units Ordering", "POC Check", "Bunnings"]
 
 HEADER_MARKERS = {
     "POREF_PART",
