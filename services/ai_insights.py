@@ -127,7 +127,12 @@ def get_client():
 MAX_HISTORY_TURNS = 6  # keep the last 3 exchanges - bounds cost as a chat grows
 
 
-def ask_ai(data_summary: str, conversation: list[dict], user_message: str) -> str:
+def ask_ai(
+    data_summary: str,
+    conversation: list[dict],
+    user_message: str,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> str:
     """
     conversation: list of {"role": "user"|"assistant", "content": str} from
     prior turns in this session. Only the most recent turns are kept (each
@@ -162,7 +167,7 @@ def ask_ai(data_summary: str, conversation: list[dict], user_message: str) -> st
         response = client.messages.create(
             model=MODEL,
             max_tokens=10000,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=messages,
         )
         text = "".join(block.text for block in response.content if hasattr(block, "text"))
