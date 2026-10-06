@@ -46,8 +46,10 @@ def tims_last_move(tims, latest_month):
     moved = tims[TIMS_COLS[::-1]].apply(pd.to_numeric, errors="coerce").fillna(0).gt(0).to_numpy()
     back = moved.argmax(axis=1)  # months back from latest
     base = pd.Period(latest_month, "M")
-    dates = [(base - int(b)).end_time.normalize() if m else pd.NaT for b, m in zip(back, moved.any(axis=1))]
-    return pd.Series(dates, index=tims["ith_part"].astype(str).str.strip(), name="Last_Move_TIMS")
+    # 24 month-ends worked out once and looked up, not per row (~2s on 47k rows)
+    month_ends = pd.DatetimeIndex([(base - i).end_time.normalize() for i in range(len(TIMS_COLS))])
+    dates = pd.Series(month_ends[back], index=tims["ith_part"].astype(str).str.strip(), name="Last_Move_TIMS")
+    return dates.where(moved.any(axis=1))
 
 
 def ns_last_sale(ns):
