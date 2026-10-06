@@ -46,8 +46,10 @@ def ns_last_sale(ns):
     return pd.Series(d.values, index=ns["Part Number"].astype(str).str.strip(), name="Last_Sale_NS").groupby(level=0).max()
 
 
-def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12):
-    inv = reorder[reorder["Inventory Location"].astype(str).str.startswith(LOC + " ")]
+def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12, receipts=None):
+    """receipts: optional Series of part -> last receipt date at loc 10 (see last_receipts). Stock
+    received after it last moved is aged from the receipt, so new stock isn't counted as dead."""
+    inv =reorder[reorder["Inventory Location"].astype(str).str.startswith(LOC + " ")]
     inv = inv.drop_duplicates("Part_Number").copy()  # one row per supplier in the export
     inv["Part_Number"] = inv["Part_Number"].astype(str).str.strip()
     inv["Qty_On_Hand"] = _num(inv["Location On Hand"])
@@ -75,16 +77,25 @@ def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12)
     # No movement anywhere: age is at least the start of TIMS history (a lower bound).
     out["Months_Since_Move"] = ((as_at - out["Last_Move"].fillna(tims_start)).dt.days / 30.4375).round(1)
 
+    out["Last_Receipt"] = (out["Part_Number"].map(receipts) if receipts is not None
+                           else pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]"))
+    received_later = out["Last_Receipt"].notna() & ~(out["Last_Receipt"] <= out["Last_Move"])
+    # Bucket age: months since the later of last movement and last receipt.
+    last_in_or_out = out[["Last_Move", "Last_Receipt"]].max(axis=1).fillna(tims_start)
+    out["Age_Months"] = ((as_at - last_in_or_out).dt.days / 30.4375).round(1)
+
     out["Age_Basis"] = "TIMS movement (may include transfers)"
     out.loc[out["Last_Sale_NS"].notna(), "Age_Basis"] = "NetSuite sale"
     out.loc[no_move, "Age_Basis"] = "No movement in TIMS 24 mths or NetSuite (age is a minimum)"
     out.loc[no_move & ~out["In_TIMS"], "Age_Basis"] = "Not in TIMS, no NetSuite sale (new item?)"
+    out.loc[received_later, "Age_Basis"] = "Received after it last moved (age from receipt)"
+    unknown = no_move & ~out["In_TIMS"] & out["Last_Receipt"].isna()
 
-    m = out["Months_Since_Move"]
+    m = out["Age_Months"]
     out["Bucket"] = "Active"
     out.loc[m >= review_m, "Bucket"] = "Review"
     out.loc[m >= clear_m, "Bucket"] = "Clearance"
-    out.loc[no_move & ~out["In_TIMS"], "Bucket"] = "Check data"
+    out.loc[unknown, "Bucket"] = "Check data"
     aged = out["Bucket"].isin(["Review", "Clearance"])
 
     flags = [

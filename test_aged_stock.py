@@ -38,4 +38,12 @@ assert b["NONE"] == "Clearance" and b["NEW"] == "Check data"
 c = df.set_index("Part_Number").loc["COMMIT"]
 assert c["Conflict"] and "Committed" in c["Flags"] and c["Aged_Order_Override"] == "DO NOT ORDER"
 assert df.set_index("Part_Number").at["NONE", "Stock_Value"] == 50
+
+# Receipts: stock received after it last moved is aged from the receipt.
+receipts = pd.Series(pd.to_datetime(["2026-06-01", "2025-01-15", "2026-09-01"]), index=["NONE", "NEW", "T24"])
+r = compute(reorder, t, ns, "2026-10-07", "2026-07-01", receipts=receipts)[0].set_index("Part_Number")
+assert r.at["NONE", "Bucket"] == "Active" and r.at["NONE", "Age_Basis"].startswith("Received")  # was Clearance
+assert r.at["NEW", "Bucket"] == "Clearance"            # was Check data: received 21 months ago, never sold
+assert r.at["T24", "Bucket"] == "Active" and r.at["T10", "Bucket"] == "Clearance"  # untouched
+assert r.at["NONE", "Months_Since_Move"] == df.set_index("Part_Number").at["NONE", "Months_Since_Move"]
 print("ok")
