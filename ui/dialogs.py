@@ -1,3 +1,5 @@
+import html
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -22,7 +24,9 @@ def show_part_details_dialog(selected_row: pd.Series, demand_basis: str):
             if float(value).is_integer():
                 return f"{int(value):,}"
             return f"{value:,.2f}"
-        return str(value)
+        # Escaped: these go into unsafe_allow_html markup, and text like Description comes from the
+        # uploaded export - anyone who can edit an item in NetSuite controls it.
+        return html.escape(str(value))
 
     st.markdown(
         """
