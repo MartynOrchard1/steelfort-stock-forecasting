@@ -18,7 +18,7 @@ from services.ai_insights import MODEL, get_client
 
 MAX_ROWS_LISTED = 20
 AGED_COLS = ["Part_Number", "Description", "Part Group", "Qty_On_Hand", "Stock_Value",
-             "Months_Since_Move", "Bucket", "Flags"]
+             "Age_Months", "Last_Receipt", "Bucket", "Flags"]
 
 
 def _value_col(df: pd.DataFrame) -> str:
@@ -37,7 +37,9 @@ def build_aged_summary(df: pd.DataFrame) -> str:
         return "No aged stock data is currently loaded."
 
     aged = df[df["Bucket"].isin(["Review", "Clearance"])]
-    parts = ["Bucket summary (CSV - Lines, Qty on hand, Stock Value $):",
+    received = int(df["Last_Receipt"].notna().sum()) if "Last_Receipt" in df else 0
+    parts = [f"Receipt dates loaded: {'yes, ' + format(received, ',') + ' lines have one' if received else 'no'}",
+             "Bucket summary (CSV - Lines, Qty on hand, Stock Value $):",
              aged_stock.summary(df).round(0).to_csv()]
 
     by_group = (
@@ -66,9 +68,10 @@ def build_aged_summary(df: pd.DataFrame) -> str:
 
 AGED_SYSTEM_PROMPT = """You are an inventory assistant for Steelfort's spare parts department (location 10). \
 You're given a summarised snapshot of their aged stock analysis - aggregates and the biggest lines, not the full \
-dataset. Age is months since the part last moved: the latest of its last NetSuite sale and its last month with \
-positive TIMS movement (TIMS movement may include transfers, so it can understate age). Buckets: Active = moved in \
-the last 6 months; Review = 6-12 months, candidate for a portal special or flyer; Clearance = 12+ months, \
+dataset. Age_Months is months since the later of the part's last movement (its last NetSuite sale or last month \
+with positive TIMS movement - TIMS may include transfers) and its last receipt, when receipt dates are loaded. \
+Without receipt dates, stock received recently but not sold yet counts as aged, so the totals are overstated - say \
+so if the summary shows none were loaded. Buckets: Active = under 6 months; Review = 6-12 months, candidate for a portal special or flyer; Clearance = 12+ months, \
 automatically set to DO NOT ORDER in purchasing; Check data = no history anywhere (possibly a new item). \
 "Conflict" lines are aged but still committed, on order or back ordered - worth checking before discounting. Lines \
 with a reorder point will keep being reordered by NetSuite until the reorder point is removed.
