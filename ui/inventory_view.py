@@ -22,6 +22,7 @@ from services.netsuite_sales_service import (
     MIN_EXPECTED_SALES_HISTORY_DAYS,
     load_netsuite_sales_history_cached,
 )
+from ui.aged_ai_view import render_aged_ai
 from ui.ai_insights_view import render_ai_insights
 from ui.dialogs import show_part_details_dialog
 from ui.filters import render_grouping_filters
@@ -87,6 +88,9 @@ def render_inventory_mode() -> None:
         except Exception as e:  # a bad file here shouldn't take purchasing down with it
             st.session_state.pop("aged_df", None)
             st.error(f"Aged stock couldn't run on these files: {e}")
+
+        if "aged_df" in st.session_state:
+            render_aged_ai(st.session_state["aged_df"])
 
     with purchasing_tab:
         _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backorder_file)
