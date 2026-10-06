@@ -5,8 +5,10 @@ ever sees a compact summary or a short list of lines (never the full
 """
 
 import pandas as pd
+from pydantic import BaseModel
 
 import aged_stock
+from services.ai_insights import MODEL, get_client
 
 MAX_ROWS_LISTED = 20
 AGED_COLS = ["Part_Number", "Description", "Part Group", "Qty_On_Hand", "Stock_Value",
@@ -77,3 +79,72 @@ AGED_SUMMARY_REQUEST = (
     "concentrations by part group, aged lines still on order or set to auto-reorder, and "
     "anything that looks odd or worth a second look."
 )
+
+
+# ---------------------------------------------------------------------------
+# Structured-output calls (promo copy, triage, replacements)
+# ---------------------------------------------------------------------------
+NO_KEY = (
+    "No Anthropic API key configured. Add ANTHROPIC_API_KEY in Secrets (Streamlit Cloud: "
+    "Settings > Secrets, or locally in .streamlit/secrets.toml)."
+)
+
+
+def require_client():
+    client = get_client()
+    if client is None:
+        raise RuntimeError(NO_KEY)
+    return client
+
+
+def _parse(client, system: str, content: str, schema: type[BaseModel]) -> BaseModel:
+    """One Claude call whose reply is validated against `schema`."""
+    response = client.messages.parse(
+        model=MODEL,
+        max_tokens=16000,
+        system=system,
+        messages=[{"role": "user", "content": content}],
+        output_format=schema,
+    )
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError("Claude's reply was cut off - try fewer lines.")
+    if response.parsed_output is None:
+        raise RuntimeError(f"Claude didn't return a usable answer (stop reason: {response.stop_reason}).")
+    return response.parsed_output
+
+
+def _merge_by_part(lines: pd.DataFrame, results: list[BaseModel], columns: dict[str, str]) -> pd.DataFrame:
+    """Join per-part AI results back onto `lines`; columns maps result field -> output column."""
+    out = pd.DataFrame([r.model_dump() for r in results], columns=["part_number", *columns])
+    out = out.drop_duplicates("part_number").rename(columns={"part_number": "Part_Number", **columns})
+    return lines.merge(out, on="Part_Number", how="left")
+
+
+class PromoLine(BaseModel):
+    part_number: str
+    title: str
+    blurb: str
+    flyer_theme: str
+
+
+class PromoCopy(BaseModel):
+    lines: list[PromoLine]
+
+
+PROMO_PROMPT = """You write short customer-facing promo copy for Steelfort's online parts portal and flyers (outdoor power equipment, mower and appliance spare parts). You get internal part descriptions, which are terse and abbreviated (e.g. "WASHER FLAT ZP 1/2X1-1/8X10G *").
+
+For every line, return the part_number exactly as given, plus:
+- title: a clear product name a customer would search for, max 60 characters. Expand abbreviations you're sure of (ZP = zinc plated, ASSY = assembly, LH/RH = left/right hand). Keep sizes and model numbers exactly as written.
+- blurb: one sentence, max 120 characters, saying what it is and what it fits if the description says so.
+- flyer_theme: a short group name so related lines can share a flyer section (e.g. "Mower blades", "Engine oil").
+
+Only use facts in the description - never invent specs, brands, compatibility or prices. If a description is too cryptic to expand safely, keep the title close to the original wording. Ignore trailing asterisks."""
+
+
+def write_promo_copy(portal: pd.DataFrame) -> pd.DataFrame:
+    """Add Promo_Title / Promo_Blurb / Flyer_Theme to the portal specials list."""
+    content = portal[["Part_Number", "Description", "Bucket"]].to_csv(index=False)
+    result = _parse(require_client(), PROMO_PROMPT, content, PromoCopy)
+    return _merge_by_part(portal, result.lines, {
+        "title": "Promo_Title", "blurb": "Promo_Blurb", "flyer_theme": "Flyer_Theme",
+    })
