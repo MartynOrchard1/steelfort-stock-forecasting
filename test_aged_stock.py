@@ -53,8 +53,12 @@ lr = last_receipts([
     pd.DataFrame({"Item": ["NONE", "NONE", "T24"], "Date": ["01/06/2026", "15/09/2026", "02/09/2026"],
                   "Location": ["10 - PALM NTH PARTS DEP", "DC - PALM NTH DC", "10 - PALM NTH PARTS DEP"]}),
     pd.DataFrame({"ith_part": ["NONE "], "Last Received Date": ["2026-03-01"], "ith_loc": ["10"], "Qty Allocated": ["0"]}),
+    # The TIMS export as IT supplied it (SQL headers, ISO dates read from Excel as text).
+    pd.DataFrame({"# ITM_Part": ["T18", "T18"], "ITM_Loc": ["10", "DC"],
+                  "MAX(STR_TO_DATE(ITM_Date, '%d/%m/%Y'))": ["2026-02-03 00:00:00", "2026-09-30 00:00:00"]}),
 ])
 assert lr["NONE"] == pd.Timestamp("2026-06-01") and lr["T24"] == pd.Timestamp("2026-09-02")  # DC row ignored
+assert lr["T18"] == pd.Timestamp("2026-02-03")  # 3 Feb - ISO date not flipped to 2 Mar by dayfirst
 try:
     last_receipts([pd.DataFrame({"Item": ["X"], "Qty": ["1"]})])
     raise AssertionError("missing date column should raise")
