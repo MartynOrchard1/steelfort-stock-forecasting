@@ -176,7 +176,7 @@ TRIAGE_PROMPT = """You help Steelfort's spare parts department (outdoor power eq
 
 Base it only on the line's description, part group, supplier, quantity, value and age. Months_Since_Move is a minimum when Flags says so. Prefer "Keep as insurance spare" only when the part is genuinely critical, not just expensive."""
 
-TRIAGE_CHUNK = 50  # lines per request - keeps each reply well under max_tokens
+CHUNK = 50  # lines per request - keeps each reply well under max_tokens
 TRIAGE_COLS = ["Part_Number", "Description", "Part Group", "Supplier", "Qty_On_Hand", "Unit_Cost",
                "Stock_Value", "Months_Since_Move", "Flags"]
 
@@ -191,13 +191,18 @@ def clearance_lines(aged_df: pd.DataFrame, reorder: pd.DataFrame | None, top_n: 
     return lines.assign(Supplier=lines["Part_Number"].map(supplier).fillna(""))[TRIAGE_COLS].round(2)
 
 
+def _parse_chunked(system: str, lines: pd.DataFrame, schema: type[BaseModel]) -> list:
+    """Send `lines` as CSV in chunks of CHUNK, four requests at a time; returns every chunk's .lines."""
+    client = require_client()  # resolved once here: st.secrets isn't for worker threads
+    chunks = [lines.iloc[i:i + CHUNK].to_csv(index=False) for i in range(0, len(lines), CHUNK)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = pool.map(lambda c: _parse(client, system, c, schema).lines, chunks)
+        return [line for chunk in results for line in chunk]
+
+
 def triage_clearance(lines: pd.DataFrame) -> pd.DataFrame:
     """Add Suggested_Action / Action_Reason to clearance_lines() output."""
-    client = require_client()  # resolved once here: st.secrets isn't for worker threads
-    chunks = [lines.iloc[i:i + TRIAGE_CHUNK].to_csv(index=False) for i in range(0, len(lines), TRIAGE_CHUNK)]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = pool.map(lambda c: _parse(client, TRIAGE_PROMPT, c, Triage).lines, chunks)
-        triaged = [line for chunk in results for line in chunk]
+    triaged = _parse_chunked(TRIAGE_PROMPT, lines, Triage)
     return _merge_by_part(lines, triaged, {"action": "Suggested_Action", "reason": "Action_Reason"})
 
 
