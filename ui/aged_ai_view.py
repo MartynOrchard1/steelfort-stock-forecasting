@@ -50,8 +50,8 @@ def _read_raw(uploaded_file) -> pd.DataFrame | None:
 
 def _render_triage(aged_df: pd.DataFrame, reorder_file) -> None:
     with st.expander("🧹 Clearance triage"):
-        st.caption("Suggests an action for the highest-value Clearance lines: discount, bundle, return to "
-                   "supplier, write off, or keep as an insurance spare. Suggestions to review, not decisions.")
+        st.caption("Suggests an action for the highest-value Clearance lines: discount, bundle, write off, "
+                   "or keep as an insurance spare. Suggestions to review, not decisions.")
         top_n = st.slider("Lines to triage (highest value first)", 50, 500, 200, 50, key="aged_triage_n")
         if st.button(f"Triage top {top_n} Clearance lines", key="aged_triage_btn"):
             lines = clearance_lines(aged_df, _read_raw(reorder_file), top_n)

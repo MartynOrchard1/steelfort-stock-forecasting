@@ -161,8 +161,8 @@ def write_promo_copy(portal: pd.DataFrame) -> pd.DataFrame:
 
 class TriageLine(BaseModel):
     part_number: str
-    action: Literal["Discount / portal special", "Bundle with related parts", "Return to supplier",
-                    "Write off / scrap", "Keep as insurance spare"]
+    action: Literal["Discount / portal special", "Bundle with related parts", "Write off / scrap",
+                    "Keep as insurance spare"]
     reason: str
 
 
@@ -173,11 +173,10 @@ class Triage(BaseModel):
 TRIAGE_PROMPT = """You help Steelfort's spare parts department (outdoor power equipment, mower and appliance parts) decide what to do with Clearance stock: parts on hand that haven't moved in 12+ months. For every line, return the part_number exactly as given, one action, and a reason of one short sentence (max 20 words):
 - "Discount / portal special": a part customers still buy, just slowly - price it to move.
 - "Bundle with related parts": cheap, small or slow on its own but sells alongside other parts (e.g. washers, bolts, belts with pulleys).
-- "Return to supplier": high value, likely still current with the supplier, worth asking for a credit.
 - "Write off / scrap": obsolete, superseded, damaged-sounding, or worth too little to handle.
 - "Keep as insurance spare": slow but critical - a customer would be stuck without it and it's hard to get quickly (e.g. engine, transmission, steering or electronic control parts for machines still in use).
 
-Base it only on the line's description, part group, supplier, quantity, value and age. Months_Since_Move is a minimum when Flags says so. Prefer "Keep as insurance spare" only when the part is genuinely critical, not just expensive."""
+Base it only on the line's description, part group, supplier, quantity, value and age. Months_Since_Move is a minimum when Flags says so. Prefer "Keep as insurance spare" only when the part is genuinely critical, not just expensive. Stock can't be sent back to suppliers, so never suggest that in a reason."""
 
 CHUNK = 50  # lines per request - keeps each reply well under max_tokens
 TRIAGE_COLS = ["Part_Number", "Description", "Part Group", "Supplier", "Qty_On_Hand", "Unit_Cost",
