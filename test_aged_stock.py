@@ -68,4 +68,17 @@ try:
     raise AssertionError("missing date column should raise")
 except ValueError:
     pass
+# Filters
+from aged_stock import filter_view
+f = pd.DataFrame({"Part_Number": ["A1", "B2", "C3"], "Description": ["Blade", "WASHER zp", None],
+                  "Part Group": ["G1", "G2", "G1"], "Part Type": ["T1", "T1", "T2"], "Supplier": ["S1", "S2", "S1"],
+                  "Flags": ["Back ordered; Obsolete part group", "", "Obsolete part group"],
+                  "Age_Basis": ["NetSuite sale", "No movement", "No movement"],
+                  "Age_Months": [3.0, 26.2, 14.0], "Stock_Value": [10.0, 500.0, float("nan")]})
+ids = lambda **kw: list(filter_view(f, **kw)["Part_Number"])
+assert ids() == ["A1", "B2", "C3"]
+assert ids(groups=["G1"], types=["T2"]) == ["C3"] and ids(suppliers=["S2"]) == ["B2"]
+assert ids(flags=["Obsolete part group"]) == ["A1", "C3"] and ids(bases=["No movement"]) == ["B2", "C3"]
+assert ids(age=(12, 20)) == ["C3"] and ids(min_value=100) == ["B2"]
+assert ids(search="washer") == ["B2"] and ids(search="c3") == ["C3"]
 print("ok")

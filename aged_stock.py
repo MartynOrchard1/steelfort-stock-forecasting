@@ -11,6 +11,7 @@ import io
 import re
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 LOC = "10"
@@ -166,6 +167,28 @@ def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12,
     return out.sort_values(sort, ascending=False).reset_index(drop=True), bool(cost)
 
 
+def filter_view(df, groups=(), types=(), suppliers=(), flags=(), bases=(), age=None, min_value=0, search=""):
+    """The Filters panel. Empty selections don't filter; flags match lines carrying any selected flag."""
+    from utils.filters import apply_grouping_filters
+
+    v = apply_grouping_filters(df, list(groups), list(types))
+    if suppliers:
+        v = v[v["Supplier"].isin(suppliers)]
+    if flags:
+        v = v[v["Flags"].map(lambda s: any(f in s for f in flags))]
+    if bases:
+        v = v[v["Age_Basis"].isin(bases)]
+    if age:
+        v = v[v["Age_Months"].between(*age)]
+    if min_value:
+        v = v[v["Stock_Value"].fillna(0) >= min_value]
+    if search:
+        q = search.strip()
+        v = v[v["Part_Number"].str.contains(q, case=False, regex=False)
+              | v["Description"].fillna("").str.contains(q, case=False, regex=False)]
+    return v
+
+
 def summary(df):
     s = df.groupby("Bucket").agg(Lines=("Part_Number", "size"), Qty=("Qty_On_Hand", "sum"),
                                  Value=("Stock_Value", "sum"))
@@ -216,7 +239,8 @@ def render(reorder=None, tims_file=None, ns_file=None):
 
     if reorder is None or ft is None or fn is None:
         st.info("Upload the reorder report, TIMS history and NetSuite sales history to run.")
-        st.session_state.pop("aged_df", None)  # don't leave a stale override on the purchasing tab
+        st.session_state.pop("aged_df", None)  # don't leave a stale override in Spare Parts Ordering
+        st.session_state.pop("aged_view", None)
         return
 
     read = lambda f: pd.read_csv(f, dtype=str) if f.name.lower().endswith(".csv") else pd.read_excel(f, dtype=str)
@@ -234,7 +258,11 @@ def render(reorder=None, tims_file=None, ns_file=None):
         st.warning("No cost column found (e.g. 'Average Cost') - showing quantities only, sorted by qty. "
                    "Add Average Cost to the Part Reorder Rpt saved search to get stock values.")
 
-    s = summary(df)
+    fdf = _render_filters(st, df, has_cost)
+    # Everything below follows the filters; the DO NOT ORDER override above keeps the full result.
+    st.session_state["aged_view"] = fdf
+
+    s = summary(fdf)
     cols = st.columns(4)
     for col, b in zip(cols, s.index):
         val = f"${s.at[b, 'Value']:,.0f}" if has_cost else f"{s.at[b, 'Qty']:,.0f} units"
@@ -243,16 +271,44 @@ def render(reorder=None, tims_file=None, ns_file=None):
 
     show = st.multiselect("Show buckets", list(s.index), ["Review", "Clearance"], key="aged_show")
     only_conf = st.checkbox("Only lines with conflicts (committed / on order / back ordered)", key="aged_conf")
-    view = df[df["Bucket"].isin(show)]
+    view = fdf[fdf["Bucket"].isin(show)]
     if only_conf:
         view = view[view["Conflict"]]
     st.dataframe(view, width="stretch", hide_index=True)
 
-    portal = portal_list(df, top_n, disc_r, disc_c, has_cost)
+    portal = portal_list(fdf, top_n, disc_r, disc_c, has_cost)
     st.markdown("**Portal specials entry list** (for the New Promotion form)")
     st.dataframe(portal, width="stretch", hide_index=True)
-    st.download_button("Download aged stock report (Excel)", to_excel(df, portal, has_cost),
+    st.download_button("Download aged stock report (Excel)", to_excel(fdf, portal, has_cost),
                        f"aged_stock_loc10_{as_at:%Y%m%d}.xlsx", key="aged_dl")
+
+
+def _render_filters(st, df, has_cost):
+    from ui.filters import render_grouping_filters
+    from utils.filters import distinct_values
+
+    with st.expander("Filters", expanded=True):
+        groups, types = render_grouping_filters(df, key_prefix="aged")
+        c1, c2 = st.columns(2)
+        suppliers = c1.multiselect("Supplier", distinct_values(df, "Supplier"), key="aged_f_supplier")
+        flag_names = sorted({f for s in df["Flags"] for f in s.split("; ") if f})
+        flags = c2.multiselect("Flags", flag_names, key="aged_f_flags",
+                               help="Lines carrying any of the selected flags.")
+        c3, c4 = st.columns(2)
+        bases = c3.multiselect("Age basis", sorted(df["Age_Basis"].unique()), key="aged_f_basis",
+                               help="Why a line has the age it has - e.g. only stock with no movement in 24 months.")
+        top = int(np.ceil(df["Age_Months"].max())) if len(df) else 1
+        age = c4.slider("Age (months)", 0, top, (0, top), key="aged_f_age")
+        c5, c6 = st.columns(2)
+        min_value = c5.number_input("Min stock value per line ($)", 0, None, 0, 50, key="aged_f_min",
+                                    disabled=not has_cost)
+        search = c6.text_input("Search part number or description", key="aged_f_search")
+
+    fdf = filter_view(df, groups, types, suppliers, flags, bases, age if age != (0, top) else None,
+                      min_value, search)
+    if len(fdf) < len(df):
+        st.caption(f"Filtered: {len(fdf):,} of {len(df):,} lines")
+    return fdf
 
 
 if __name__ == "__main__":
