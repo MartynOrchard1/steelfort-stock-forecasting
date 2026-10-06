@@ -38,4 +38,17 @@ portal = pd.DataFrame({"Part_Number": ["A1", "B2"], "Description": ["WASHER ZP",
 promo = ai.write_promo_copy(portal)
 assert list(promo["Promo_Title"]) == ["title!", "title!"] and len(promo) == 2, promo
 
+aged = pd.DataFrame({
+    "Part_Number": [f"P{i}" for i in range(120)] + ["ACTIVE"],
+    "Description": "X", "Part Group": "G", "Qty_On_Hand": 1.0, "Unit_Cost": 2.0,
+    "Stock_Value": [float(i) for i in range(120)] + [999.0], "Months_Since_Move": 13.0, "Flags": "",
+    "Bucket": ["Clearance"] * 120 + ["Active"],
+})
+reorder = pd.DataFrame({"Part_Number": ["P119 ", "P119"], "Supplier": ["SUP1", "SUP2"]})  # dup supplier rows
+lines = ai.clearance_lines(aged, reorder, 110)
+assert len(lines) == 110 and lines.iloc[0]["Part_Number"] == "P119" and lines.iloc[0]["Supplier"] == "SUP1"
+fake.calls = 0
+triage = ai.triage_clearance(lines)
+assert fake.calls == 3 and len(triage) == 110 and triage["Suggested_Action"].eq("Discount / portal special").all()
+
 print("ok")

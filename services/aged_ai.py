@@ -4,6 +4,9 @@ ever sees a compact summary or a short list of lines (never the full
 15,000-line aged table), and nothing runs until someone clicks a button.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from typing import Literal
+
 import pandas as pd
 from pydantic import BaseModel
 
@@ -148,3 +151,48 @@ def write_promo_copy(portal: pd.DataFrame) -> pd.DataFrame:
     return _merge_by_part(portal, result.lines, {
         "title": "Promo_Title", "blurb": "Promo_Blurb", "flyer_theme": "Flyer_Theme",
     })
+
+
+class TriageLine(BaseModel):
+    part_number: str
+    action: Literal["Discount / portal special", "Bundle with related parts", "Return to supplier",
+                    "Write off / scrap", "Keep as insurance spare"]
+    reason: str
+
+
+class Triage(BaseModel):
+    lines: list[TriageLine]
+
+
+TRIAGE_PROMPT = """You help Steelfort's spare parts department (outdoor power equipment, mower and appliance parts) decide what to do with Clearance stock: parts on hand that haven't moved in 12+ months. For every line, return the part_number exactly as given, one action, and a reason of one short sentence (max 20 words):
+- "Discount / portal special": a part customers still buy, just slowly - price it to move.
+- "Bundle with related parts": cheap, small or slow on its own but sells alongside other parts (e.g. washers, bolts, belts with pulleys).
+- "Return to supplier": high value, likely still current with the supplier, worth asking for a credit.
+- "Write off / scrap": obsolete, superseded, damaged-sounding, or worth too little to handle.
+- "Keep as insurance spare": slow but critical - a customer would be stuck without it and it's hard to get quickly (e.g. engine, transmission, steering or electronic control parts for machines still in use).
+
+Base it only on the line's description, part group, supplier, quantity, value and age. Months_Since_Move is a minimum when Flags says so. Prefer "Keep as insurance spare" only when the part is genuinely critical, not just expensive."""
+
+TRIAGE_CHUNK = 50  # lines per request - keeps each reply well under max_tokens
+TRIAGE_COLS = ["Part_Number", "Description", "Part Group", "Supplier", "Qty_On_Hand", "Unit_Cost",
+               "Stock_Value", "Months_Since_Move", "Flags"]
+
+
+def clearance_lines(aged_df: pd.DataFrame, reorder: pd.DataFrame | None, top_n: int) -> pd.DataFrame:
+    """The top_n Clearance lines by value, with supplier from the raw reorder report when available."""
+    lines = aged_df[aged_df["Bucket"] == "Clearance"].sort_values(_value_col(aged_df), ascending=False).head(top_n)
+    supplier = {}
+    if reorder is not None and "Supplier" in reorder.columns:
+        r = reorder.assign(Part_Number=reorder["Part_Number"].astype(str).str.strip()).drop_duplicates("Part_Number")
+        supplier = dict(zip(r["Part_Number"], r["Supplier"].fillna("")))  # first supplier row, as aged_stock does
+    return lines.assign(Supplier=lines["Part_Number"].map(supplier).fillna(""))[TRIAGE_COLS].round(2)
+
+
+def triage_clearance(lines: pd.DataFrame) -> pd.DataFrame:
+    """Add Suggested_Action / Action_Reason to clearance_lines() output."""
+    client = require_client()  # resolved once here: st.secrets isn't for worker threads
+    chunks = [lines.iloc[i:i + TRIAGE_CHUNK].to_csv(index=False) for i in range(0, len(lines), TRIAGE_CHUNK)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = pool.map(lambda c: _parse(client, TRIAGE_PROMPT, c, Triage).lines, chunks)
+        triaged = [line for chunk in results for line in chunk]
+    return _merge_by_part(lines, triaged, {"action": "Suggested_Action", "reason": "Action_Reason"})
