@@ -279,7 +279,8 @@ def render(reorder=None, tims_file=None, ns_file=None):
     portal = portal_list(fdf, top_n, disc_r, disc_c, has_cost)
     st.markdown("**Portal specials entry list** (for the New Promotion form)")
     st.dataframe(portal, width="stretch", hide_index=True)
-    st.download_button("Download aged stock report (Excel)", to_excel(fdf, portal, has_cost),
+    # A callable is only run when the button is clicked - building the workbook on every rerun took ~5s.
+    st.download_button("Download aged stock report (Excel)", lambda: to_excel(fdf, portal, has_cost),
                        f"aged_stock_loc10_{as_at:%Y%m%d}.xlsx", key="aged_dl")
 
 
