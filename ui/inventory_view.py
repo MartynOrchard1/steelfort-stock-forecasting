@@ -1,6 +1,11 @@
+import io
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+import aged_stock
+from services.file_loader import load_file_from_bytes
 
 from services.forecast_service import (
     load_forecast_history_cached,
@@ -23,6 +28,7 @@ from ui.filters import render_grouping_filters
 from utils.helpers import (
     get_forecast_month_columns_newest_first,
     get_uploaded_file_bytes,
+    normalize_part_number,
 )
 
 from ui.demand_trend_preview import render_demand_trend_preview
@@ -67,6 +73,33 @@ def render_inventory_mode() -> None:
         key="backorder_file",
     )
 
+    purchasing_tab, aged_tab = st.tabs(["🛒 Purchasing", "🕰️ Aged Stock"])
+
+    # Aged Stock runs first so st.session_state["aged_df"] is current when
+    # the purchasing tab applies its DO NOT ORDER override.
+    with aged_tab:
+        try:
+            aged_stock.render(
+                load_file_from_bytes(*get_uploaded_file_bytes(inventory_file)) if inventory_file else None,
+                _as_csv(forecast_file),
+                _as_csv(netsuite_sales_file),
+            )
+        except Exception as e:  # a bad file here shouldn't take purchasing down with it
+            st.session_state.pop("aged_df", None)
+            st.error(f"Aged stock couldn't run on these files: {e}")
+
+    with purchasing_tab:
+        _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backorder_file)
+
+
+def _as_csv(uploaded_file):
+    """Fresh copy of an uploaded CSV for aged_stock to read (None for Excel / no file)."""
+    if uploaded_file is None or not uploaded_file.name.lower().endswith(".csv"):
+        return None
+    return io.BytesIO(uploaded_file.getvalue())
+
+
+def _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backorder_file) -> None:
     if not inventory_file:
         st.info("Upload your NetSuite inventory export to get started.")
         return
@@ -250,6 +283,19 @@ def render_inventory_mode() -> None:
         df["Back Ordered"] = 0
         df["Backorder Customers"] = 0
 
+    # Aged stock feedback: Clearance parts (12+ months no movement at loc 10)
+    # are never ordered, whatever the demand / backorder maths above said.
+    # Base Recommended Order keeps the pre-override qty so these still show
+    # under "Only items needing order".
+    df["Order Reason"] = ""
+    aged_df = st.session_state.get("aged_df")
+    if aged_df is not None:
+        override = dict(zip(normalize_part_number(aged_df["Part_Number"]), aged_df["Aged_Order_Override"]))
+        do_not_order = df["Part_Number"].map(override).eq("DO NOT ORDER")
+        df.loc[do_not_order, "Priority V2"] = "⛔ DO NOT ORDER"
+        df.loc[do_not_order, "Recommended Order"] = 0
+        df.loc[do_not_order, "Order Reason"] = "Aged stock - 12+ months no movement"
+
     col1, col2, col3, col4, col5 = st.columns([2, 2, 1.5, 1, 1])
 
     main_filter_values = sorted(
@@ -353,7 +399,7 @@ def render_inventory_mode() -> None:
     simple_review_columns = [
         "Part_Number", "Description", "POREF_SUPP", "Part Group", "Part Type", "Spring Category", "Qty on hand",
         "Qty Allocated", "Qty on Order", "Available", "Net After POs",
-        "Back Ordered", "Recommended Order", "Priority V2"
+        "Back Ordered", "Recommended Order", "Priority V2", "Order Reason"
     ]
     simple_review_columns = [c for c in simple_review_columns if c in filtered.columns]
 
@@ -365,7 +411,7 @@ def render_inventory_mode() -> None:
         "Effective Min", "Max", "Demand_Per_Month_Used", "Forecast Average",
         "Forecast Months Used", "Target Stock", "Base Recommended Order",
         "Recommended Order", "EOQ", "6mAvg", "6mUsage", "12mAvg", "12mUsage",
-        "Back Ordered", "Backorder Customers", "Priority V2", "Forecast Matched?",
+        "Back Ordered", "Backorder Customers", "Priority V2", "Order Reason", "Forecast Matched?",
         "NetSuite Qty Sold", "NetSuite Revenue Sold", "NetSuite Last Sale Date",
     ]
     detailed_review_columns = [c for c in detailed_review_columns if c in filtered.columns]

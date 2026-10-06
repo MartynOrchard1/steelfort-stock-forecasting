@@ -29,7 +29,7 @@ def render_ai_insights(df: pd.DataFrame, key_prefix: str = "") -> None:
 
     if col1.button(
         "Generate summary & flag anomalies",
-        use_container_width=True,
+        width="stretch",
         key=f"{key_prefix}ai_generate_summary",
     ):
         with st.spinner("Asking Claude..."):
@@ -49,7 +49,7 @@ def render_ai_insights(df: pd.DataFrame, key_prefix: str = "") -> None:
             "role": "assistant", "content": answer,
         })
 
-    if col2.button("Clear chat", use_container_width=True, key=f"{key_prefix}ai_clear_chat"):
+    if col2.button("Clear chat", width="stretch", key=f"{key_prefix}ai_clear_chat"):
         st.session_state[history_key] = []
 
     for turn in st.session_state[history_key]:
