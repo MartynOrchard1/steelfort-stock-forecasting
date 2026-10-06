@@ -46,6 +46,10 @@ assert r.at["NONE", "Bucket"] == "Active" and r.at["NONE", "Age_Basis"].startswi
 assert r.at["NEW", "Bucket"] == "Clearance"            # was Check data: received 21 months ago, never sold
 assert r.at["T24", "Bucket"] == "Active" and r.at["T10", "Bucket"] == "Clearance"  # untouched
 assert r.at["NONE", "Months_Since_Move"] == df.set_index("Part_Number").at["NONE", "Months_Since_Move"]
+# A receipt from before the TIMS window can't age a no-movement part past the window (it may have sold in between).
+old = compute(reorder, t, ns, "2026-10-07", "2026-07-01", receipts=pd.Series([pd.Timestamp("2016-03-01")], index=["NONE"]))[0]
+o = old.set_index("Part_Number").loc["NONE"]
+assert o["Age_Months"] == o["Months_Since_Move"] == 26.2 and o["Age_Basis"].startswith("No movement"), o
 
 # Receipt files: NetSuite-style (Item / Date / Location) and TIMS-style (ith_part / Last Received Date), loc 10 only.
 from aged_stock import last_receipts

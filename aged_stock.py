@@ -119,9 +119,12 @@ def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12,
 
     out["Last_Receipt"] = (out["Part_Number"].map(receipts) if receipts is not None
                            else pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]"))
-    received_later = out["Last_Receipt"].notna() & ~(out["Last_Receipt"] <= out["Last_Move"])
+    # With no movement in the TIMS window we only know it last moved before tims_start, so a receipt
+    # older than that (e.g. 2016) can't make it older than the window - it could have sold in 2020.
+    last_move_bound = out["Last_Move"].fillna(tims_start)
+    received_later = out["Last_Receipt"] > last_move_bound
     # Bucket age: months since the later of last movement and last receipt.
-    last_in_or_out = out[["Last_Move", "Last_Receipt"]].max(axis=1).fillna(tims_start)
+    last_in_or_out = pd.concat([last_move_bound, out["Last_Receipt"]], axis=1).max(axis=1)
     out["Age_Months"] = ((as_at - last_in_or_out).dt.days / 30.4375).round(1)
 
     out["Age_Basis"] = "TIMS movement (may include transfers)"
