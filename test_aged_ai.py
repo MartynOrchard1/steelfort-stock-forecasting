@@ -17,7 +17,7 @@ class FakeClient:
 
     def parse(self, *, output_format, messages, **_):
         self.calls += 1
-        rows = pd.read_csv(io.StringIO(messages[0]["content"].split("\n\n")[-1]), dtype=str)
+        rows = pd.read_csv(io.StringIO(messages[0]["content"]), dtype=str)
         item = output_format.model_fields["lines"].annotation.__args__[0]
 
         def value(name, ann):
@@ -51,26 +51,39 @@ fake.calls = 0
 triage = ai.triage_clearance(lines)
 assert fake.calls == 3 and len(triage) == 110 and triage["Suggested_Action"].eq("Discount / portal special").all()
 
-known = {k.upper(): k for k in ["PPBB043", "618P09970", "MT13120-004-0000", "PK411135", "FBOPL01"]}
+known = {k.upper(): k for k in ["PPBB043", "618P09970", "MT13120-004-0000", "PK411135", "FBOPL01", "MT503P01033",
+                                 "605380", "F06506", "MT91804125C", "PM8136800"]}
 desc = {"OLD1": "REF PPBB043", "OLD2": "TRANS LH (TRY 618P09970)*", "OLD3": "RING SET ref 13120-004-0000",
         "OLD4": "BOLT M6 *REF TO FBOPL01*", "OLD5": "NO LONGER AVAILABLE  OV", "OLD6": "PLAIN WASHER",
-        "OLD7": "REF PK411135", "NEW1": "REF PPBB043"}
+        "OLD7": "REF PK411135", "NOTE1": "GASKET HOUSING", "NOTE2": "SPINDLE KIT", "NOTE3": "FAN ASSY", "NOTE4": "SPINDLE LH", "NOTE5": "DRAIN VALVE",
+        "NEW1": "REF PPBB043"}
+notes = {"NOTE1": "Replaced by 503P01033", "NOTE2": "SUPERSEDES 605380 AND 607208 | SHAFT",
+         "NOTE3": "REFER F06506 SPEED CONTROLLER", "OLD1": "ONCE SOLD REF PK411135",
+         "NOTE4": "FITS CUB 1023 | HOWEVER.....918042126 NOW SUPERSEDES TO MT91804125C",  # about another part
+         "NOTE5": "OV(291) | ** ONCE SOLD REF:PM8136800 **"}
 aged = pd.DataFrame({"Part_Number": list(desc), "Description": list(desc.values()),
-                     "Bucket": ["Clearance"] * 6 + ["Clearance", "Active"], "Qty_On_Hand": 1.0, "Stock_Value": 1.0,
-                     "Months_Since_Move": 13.0, "Flags": ["", "", "", "", "Possibly superseded", "", "", ""]})
-lines = ai.superseded_lines(aged, known).set_index("Part_Number")
-assert list(lines.index) == ["OLD1", "OLD2", "OLD3", "OLD4", "OLD5", "OLD7"]  # plain + Active lines skipped
-assert lines.at["OLD1", "Replacement"] == "PPBB043" and lines.at["OLD2", "Replacement"] == "618P09970"
+                     "Bucket": ["Clearance"] * 12 + ["Active"], "Qty_On_Hand": 1.0, "Stock_Value": 1.0,
+                     "Months_Since_Move": 13.0, "Flags": [""] * 4 + ["Possibly superseded"] + [""] * 8})
+lines = ai.superseded_lines(aged, known, notes).set_index("Part_Number")
+assert list(lines.index) == ["OLD1", "OLD2", "OLD3", "OLD4", "OLD5", "OLD7", "NOTE1", "NOTE2", "NOTE3", "NOTE4", "NOTE5"]
+assert lines.at["OLD1", "Replacement"] == "PPBB043" and lines.at["OLD2", "Replacement"] == "618P09970"  # desc beats notes
 assert lines.at["OLD3", "Found_By"] == "Description (prefix added)" and lines.at["OLD3", "Replacement"] == "MT13120-004-0000"
-assert lines.at["OLD4", "Found_By"] == "" and lines.at["OLD5", "Found_By"] == ""  # left for Claude
+assert lines.at["NOTE1", "Found_By"] == "Item notes (prefix added)" and lines.at["NOTE1", "Replacement"] == "MT503P01033"
+assert lines.at["NOTE5", "Found_By"] == "Item notes" and lines.at["NOTE5", "Replacement"] == "PM8136800"
+for p in ["OLD4", "OLD5", "NOTE2", "NOTE3", "NOTE4"]:  # wrong-direction / related-part notes are left for Claude
+    assert lines.at[p, "Found_By"] == "", p
 
 fake.calls = 0
 resolved = ai.ai_resolve_replacements(lines.reset_index(), known)  # fake answers "replacement!" - not a real item
 assert fake.calls == 1 and resolved.set_index("Part_Number").at["OLD4", "Replacement"] == ""
 
 last_move = pd.Series(pd.to_datetime(["2026-09-01", "2025-01-31"]), index=["PPBB043", "618P09970"])
-status = ai.replacement_status(resolved, aged, last_move, "2026-10-07").set_index("Part_Number")["Replacement_Status"]
+out = ai.replacement_status(resolved, aged, last_move, "2026-10-07").set_index("Part_Number")
+status = out["Replacement_Status"]
 assert status["OLD1"].startswith("Replacement is selling") and status["OLD2"].startswith("Replacement is slow")
 assert status["OLD7"] == "Replacement has no recorded movement" and status["OLD5"] == "No replacement found"
+# Only lines whose description doesn't already say REF need fixing in NetSuite.
+assert out.at["NOTE1", "Needs_REF"] == "REF to MT503P01033" and out.at["OLD2", "Needs_REF"] == "REF to 618P09970"
+assert out.at["OLD1", "Needs_REF"] == "" and out.at["OLD5", "Needs_REF"] == ""
 
 print("ok")

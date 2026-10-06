@@ -66,9 +66,10 @@ def _render_triage(aged_df: pd.DataFrame, reorder_file) -> None:
 
 def _render_replacements(aged_df: pd.DataFrame, reorder_file, tims_csv, ns_csv) -> None:
     with st.expander("🔁 Replacement parts for superseded stock"):
-        st.caption("Finds the replacement each aged line's description points to (REF / TRY / REPLACED BY / NOW), "
-                   "asks Claude only about the ones a pattern can't resolve, then checks whether the "
-                   "replacement is selling - if it is, sell the old stock against its demand.")
+        st.caption("Finds the replacement each aged line's description or item notes point to (REF / TRY / "
+                   "SUPERSEDED BY / REPLACED BY...), asks Claude only about the ones a pattern can't resolve, then "
+                   "checks whether the replacement is selling - if it is, sell the old stock against its demand. "
+                   "Needs_REF lists parts to REF over to the new part number in NetSuite.")
         if reorder_file is None or tims_csv is None or ns_csv is None:
             st.info("Needs the reorder report plus the TIMS and NetSuite sales history CSVs.")
             return

@@ -206,32 +206,57 @@ def triage_clearance(lines: pd.DataFrame) -> pd.DataFrame:
     return _merge_by_part(lines, triaged, {"action": "Suggested_Action", "reason": "Action_Reason"})
 
 
+PART = r"([A-Z0-9][A-Z0-9\-/.]*\d[A-Z0-9\-/.]*)"
 # Descriptions name replacements like "REF PPBB043", "(TRY 618P09970)*", "REPLACED BY MT9420616A".
 REPLACEMENT_HINT = re.compile(r"\b(?:REF|TRY|REPLACED BY|NOW)\b", re.I)
-REPLACEMENT_REF = re.compile(r"\b(?:REF:?|TRY|REPLACED BY|NOW)\s+([A-Z0-9][A-Z0-9\-/.]*\d[A-Z0-9\-/.]*)", re.I)
+REPLACEMENT_REF = re.compile(r"\b(?:REF:?|TRY|REPLACED BY|NOW)\s+" + PART, re.I)
+# Item notes are free text, and direction matters: "SUPERSEDES 605380" means THIS part replaced
+# 605380. Only phrases that can't point the wrong way are matched here, and only at the start of
+# a " | " note segment - long notes also narrate other parts ("HOWEVER 918042126 NOW SUPERSEDES TO
+# ..."). Everything else goes to Claude.
+NOTES_HINT = re.compile(r"\b(?:REF|REFER|REFERRED|SUPERSEDE[DS]?|SUPERCEDE[DS]?|REPLACED BY|TRY|NOW|USE P/?N)\b", re.I)
+NOTES_REF = re.compile(r"(?:^|\|)[^A-Z0-9|]*(?:(?:WHEN|ONCE)\s+SOLD\s+REF(?:ER)?|SUPER[SC]EDE[DS]?\s+(?:TO|BY)"
+                       r"|REPLACED\s+BY)\s*[:\-]?\s*" + PART, re.I)
 REPLACEMENT_COLS = ["Part_Number", "Description", "Bucket", "Qty_On_Hand", "Stock_Value", "Months_Since_Move"]
 
 
-def superseded_lines(aged_df: pd.DataFrame, known: dict[str, str]) -> pd.DataFrame:
+def _tokens(text: pd.Series, pattern: re.Pattern) -> pd.Series:
+    return text.str.extract(pattern, expand=False).fillna("").str.upper().str.rstrip("./-")
+
+
+def _resolve(token: str, known: dict[str, str]) -> tuple[str, str]:
+    """Token -> (item-list part, note). Descriptions often drop the item prefix ("REF 13120-004-0000"
+    means MT13120-004-0000), so a suffix match counts when exactly one item ends with the token."""
+    if token in known:
+        return known[token], ""
+    matches = _ending_with(token, known)
+    return (matches[0], " (prefix added)") if len(matches) == 1 else ("", "")
+
+
+def superseded_lines(aged_df: pd.DataFrame, known: dict[str, str], notes: dict[str, str] | None = None) -> pd.DataFrame:
     """
-    Aged lines whose description points at a replacement (or that aged_stock flags as superseded),
-    with Replacement filled in where a pattern finds a part number that exists in the item list.
+    Aged lines whose description or item notes point at a replacement (or that aged_stock flags as
+    superseded), with Replacement filled in where a pattern finds a part that exists in the item list.
     known: upper-cased part number -> part number as spelled in the reorder report.
+    notes: part number -> item notes from the reorder report.
     """
     aged = aged_df[aged_df["Bucket"].isin(["Review", "Clearance"])]
+    item_notes = aged["Part_Number"].map(notes or {}).fillna("")
     lines = aged[aged["Description"].fillna("").str.contains(REPLACEMENT_HINT)
-                 | aged["Flags"].str.contains("superseded")][REPLACEMENT_COLS].copy()
-    lines["Ref_Token"] = (lines["Description"].fillna("").str.extract(REPLACEMENT_REF, expand=False)
-                          .fillna("").str.upper().str.rstrip("./-"))
-    lines["Replacement"] = lines["Ref_Token"].map(known).fillna("")
-    lines["Found_By"] = np.where(lines["Replacement"] != "", "Description", "")
+                 | aged["Flags"].str.contains("superseded")
+                 | item_notes.str.contains(NOTES_HINT)][REPLACEMENT_COLS].copy()
+    lines["Item_Notes"] = item_notes
+    desc_token = _tokens(lines["Description"].fillna(""), REPLACEMENT_REF)
+    notes_token = _tokens(lines["Item_Notes"], NOTES_REF)
 
-    # Descriptions often drop the item prefix ("REF 13120-004-0000" means MT13120-004-0000):
-    # take a suffix match when exactly one item in the list ends with the token.
-    for i in lines.index[(lines["Found_By"] == "") & (lines["Ref_Token"] != "")]:
-        matches = _ending_with(lines.at[i, "Ref_Token"], known)
-        if len(matches) == 1:
-            lines.loc[i, ["Replacement", "Found_By"]] = [matches[0], "Description (prefix added)"]
+    lines["Replacement"], lines["Found_By"] = "", ""
+    for i in lines.index:  # the description is the official REF, so it wins over the notes
+        for source, token in (("Description", desc_token[i]), ("Item notes", notes_token[i])):
+            part, how = _resolve(token, known) if token else ("", "")
+            if part:
+                lines.loc[i, ["Replacement", "Found_By"]] = [part, source + how]
+                break
+    lines["Ref_Token"] = desc_token.where(desc_token != "", notes_token)  # steers Claude's candidates
     return lines
 
 
@@ -244,12 +269,21 @@ class Replacements(BaseModel):
     lines: list[ReplacementLine]
 
 
-REPLACEMENT_PROMPT = """You read terse spare-part descriptions from Steelfort's item list and find the \
-replacement (superseding) part number each one points to, e.g. "REF PPBB043" -> PPBB043, or "TRY -805" on old part \
-MT717-04110 with similar part MT717-0805 listed -> MT717-0805. For every line return the part_number exactly as \
-given and replacement: the replacement part number, preferably one from Similar_Part_Numbers, or "" if the \
-description doesn't name a replacement (e.g. "NO LONGER AVAILABLE" with nothing else, or a note like "ONCE SOLD"). \
-Never guess a part number that isn't written in the description or listed in Similar_Part_Numbers."""
+REPLACEMENT_PROMPT = """You find the replacement (superseding) part number for old spare parts in Steelfort's \
+item list, from each part's terse Description and its free-text Item_Notes. For every line return the part_number \
+exactly as given and replacement: the part that should now be sold instead of this one, or "" if there isn't one.
+
+Direction matters. These point to this part's replacement: "REF X", "WHEN SOLD REF X", "ONCE SOLD REFER X", \
+"SUPERSEDES TO X", "SUPERSEDED BY X", "REPLACED BY X", "NLA - TRY X", "NOW X" (when X is a part number), and in \
+the Description "TRY X". If a chain is described ("DID SUPERSEDE TO A THEN B NOW C"), return the latest part.
+These are NOT a replacement for this part - return "" for them: "SUPERSEDES X", "SUPERCEDED FROM X" or "REFERRED \
+FROM X" (this part replaced X), "REFER X SPEED CONTROLLER" or "REFER ALSO X" (a related part), "BEARING REF: \
+6005-2RS1 SKF" (a manufacturer's number), "FOR USE WITH ...", and an alternative to try ("IF DOESN'T FIT TRY X") \
+unless the part is no longer available.
+
+Partial references are common: "TRY -805" on old part MT717-04110 with MT717-0805 in Similar_Part_Numbers means \
+MT717-0805. Prefer a part from Similar_Part_Numbers. Never guess a part number that isn't written in the \
+description or notes or listed in Similar_Part_Numbers. When unsure, return ""."""
 
 
 def _ending_with(token: str, known: dict[str, str]) -> list[str]:
@@ -269,12 +303,12 @@ def ai_resolve_replacements(lines: pd.DataFrame, known: dict[str, str]) -> pd.Da
     todo = lines[lines["Found_By"] == ""]
     if todo.empty:
         return lines
-    content = todo[["Part_Number", "Description"]].assign(
+    ask = todo[["Part_Number", "Description", "Item_Notes"]].assign(
         Similar_Part_Numbers=[_similar(p, t, known) for p, t in zip(todo["Part_Number"], todo["Ref_Token"])]
-    ).to_csv(index=False)
-    result = _parse(require_client(), REPLACEMENT_PROMPT, content, Replacements)
+    )
+    result = _parse_chunked(REPLACEMENT_PROMPT, ask, Replacements)
     # Only accept answers that exist in the item list - anything else is treated as not found.
-    answers = {r.part_number: known.get(r.replacement.strip().upper(), "") for r in result.lines}
+    answers = {r.part_number: known.get(r.replacement.strip().upper(), "") for r in result}
     resolved = todo["Part_Number"].map(answers).fillna("")
     lines = lines.copy()
     lines.loc[todo.index, "Replacement"] = resolved
@@ -287,7 +321,10 @@ def replacement_status(lines: pd.DataFrame, aged_df: pd.DataFrame, last_move: pd
     """Is the replacement itself moving? That decides "sell old stock first" vs "write it off"."""
     months = ((pd.Timestamp(as_at) - lines["Replacement"].map(last_move)).dt.days / 30.4375).round(1)
     on_hand = aged_df.set_index("Part_Number")["Qty_On_Hand"]
+    # Found in the notes (or by Claude) but the description doesn't say REF yet - fix it in NetSuite.
+    needs_ref = (lines["Replacement"] != "") & ~lines["Description"].fillna("").str.contains(r"\bREF(?:ER)?\b", case=False)
     return lines.assign(
+        Needs_REF=np.where(needs_ref, "REF to " + lines["Replacement"], ""),
         Replacement_On_Hand=lines["Replacement"].map(on_hand).fillna(0),
         Replacement_Months_Since_Move=months,
         Replacement_Status=np.select(
@@ -300,9 +337,11 @@ def replacement_status(lines: pd.DataFrame, aged_df: pd.DataFrame, last_move: pd
 
 
 def find_replacements(aged_df, reorder, tims, ns, as_at, tims_latest_month, review_m=6) -> pd.DataFrame:
-    parts = reorder["Part_Number"].dropna().astype(str).str.strip()
-    known = dict(zip(parts.str.upper(), parts))
-    lines = ai_resolve_replacements(superseded_lines(aged_df, known), known)
+    reorder = reorder.assign(Part_Number=reorder["Part_Number"].astype(str).str.strip()).drop_duplicates("Part_Number")
+    known = dict(zip(reorder["Part_Number"].str.upper(), reorder["Part_Number"]))
+    notes_col = next((c for c in reorder.columns if "note" in c.lower()), None)  # "NOTES" in the current export
+    notes = dict(zip(reorder["Part_Number"], reorder[notes_col].fillna("").astype(str))) if notes_col else {}
+    lines = ai_resolve_replacements(superseded_lines(aged_df, known, notes), known)
     last_move = pd.concat([aged_stock.ns_last_sale(ns),
                            aged_stock.tims_last_move(tims, tims_latest_month)]).groupby(level=0).max()
     return replacement_status(lines, aged_df, last_move, as_at, review_m)
