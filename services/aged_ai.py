@@ -106,14 +106,18 @@ def require_client():
     return client
 
 
-def _parse(client, system: str, content: str, schema: type[BaseModel]) -> BaseModel:
-    """One Claude call whose reply is validated against `schema`."""
+def _parse(client, system: str, content: str, schema: type[BaseModel], effort: str | None = None) -> BaseModel:
+    """
+    One Claude call whose reply is validated against `schema`. effort="medium" suits simple
+    per-line labelling: on 20 triage lines it took 11s vs 28s at the default, with near-identical picks.
+    """
     response = client.messages.parse(
         model=MODEL,
         max_tokens=16000,
         system=system,
         messages=[{"role": "user", "content": content}],
         output_format=schema,
+        **({"output_config": {"effort": effort}} if effort else {}),
     )
     if response.stop_reason == "max_tokens":
         raise RuntimeError("Claude's reply was cut off - try fewer lines.")
@@ -153,7 +157,7 @@ Only use facts in the description - never invent specs, brands, compatibility or
 def write_promo_copy(portal: pd.DataFrame) -> pd.DataFrame:
     """Add Promo_Title / Promo_Blurb / Flyer_Theme to the portal specials list."""
     content = portal[["Part_Number", "Description", "Bucket"]].to_csv(index=False)
-    result = _parse(require_client(), PROMO_PROMPT, content, PromoCopy)
+    result = _parse(require_client(), PROMO_PROMPT, content, PromoCopy, effort="medium")
     return _merge_by_part(portal, result.lines, {
         "title": "Promo_Title", "blurb": "Promo_Blurb", "flyer_theme": "Flyer_Theme",
     })
@@ -178,7 +182,9 @@ TRIAGE_PROMPT = """You help Steelfort's spare parts department (outdoor power eq
 
 Base it only on the line's description, part group, supplier, quantity, value and age. Months_Since_Move is a minimum when Flags says so. Prefer "Keep as insurance spare" only when the part is genuinely critical, not just expensive. Stock can't be sent back to suppliers, so never suggest that in a reason."""
 
-CHUNK = 50  # lines per request - keeps each reply well under max_tokens
+# Small batches run in parallel: 100 triage lines went from ~80s (2 x 50) to ~35s (5 x 20).
+CHUNK = 20  # lines per request
+PARALLEL = 8  # requests at once
 TRIAGE_COLS = ["Part_Number", "Description", "Part Group", "Supplier", "Qty_On_Hand", "Unit_Cost",
                "Stock_Value", "Months_Since_Move", "Flags"]
 
@@ -193,18 +199,18 @@ def clearance_lines(aged_df: pd.DataFrame, reorder: pd.DataFrame | None, top_n: 
     return lines.assign(Supplier=lines["Part_Number"].map(supplier).fillna(""))[TRIAGE_COLS].round(2)
 
 
-def _parse_chunked(system: str, lines: pd.DataFrame, schema: type[BaseModel]) -> list:
-    """Send `lines` as CSV in chunks of CHUNK, four requests at a time; returns every chunk's .lines."""
+def _parse_chunked(system: str, lines: pd.DataFrame, schema: type[BaseModel], effort: str | None = None) -> list:
+    """Send `lines` as CSV in chunks of CHUNK, up to PARALLEL requests at a time; returns every chunk's .lines."""
     client = require_client()  # resolved once here: st.secrets isn't for worker threads
     chunks = [lines.iloc[i:i + CHUNK].to_csv(index=False) for i in range(0, len(lines), CHUNK)]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = pool.map(lambda c: _parse(client, system, c, schema).lines, chunks)
+    with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+        results = pool.map(lambda c: _parse(client, system, c, schema, effort).lines, chunks)
         return [line for chunk in results for line in chunk]
 
 
 def triage_clearance(lines: pd.DataFrame) -> pd.DataFrame:
     """Add Suggested_Action / Action_Reason to clearance_lines() output."""
-    triaged = _parse_chunked(TRIAGE_PROMPT, lines, Triage)
+    triaged = _parse_chunked(TRIAGE_PROMPT, lines, Triage, effort="medium")
     return _merge_by_part(lines, triaged, {"action": "Suggested_Action", "reason": "Action_Reason"})
 
 

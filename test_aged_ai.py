@@ -49,7 +49,7 @@ lines = ai.clearance_lines(aged, reorder, 110)
 assert len(lines) == 110 and lines.iloc[0]["Part_Number"] == "P119" and lines.iloc[0]["Supplier"] == "SUP1"
 fake.calls = 0
 triage = ai.triage_clearance(lines)
-assert fake.calls == 3 and len(triage) == 110 and triage["Suggested_Action"].eq("Discount / portal special").all()
+assert fake.calls == -(-110 // ai.CHUNK) and len(triage) == 110 and triage["Suggested_Action"].eq("Discount / portal special").all()
 
 known = {k.upper(): k for k in ["PPBB043", "618P09970", "MT13120-004-0000", "PK411135", "FBOPL01", "MT503P01033",
                                  "605380", "F06506", "MT91804125C", "PM8136800"]}
