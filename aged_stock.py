@@ -213,6 +213,26 @@ def to_excel(df, portal, has_cost):
     return buf.getvalue()
 
 
+def _read_upload(u):
+    """(bytes, file name) of an upload -> DataFrame of strings; a DataFrame passes straight through."""
+    if isinstance(u, pd.DataFrame):
+        return u
+    data, name = u
+    buf = io.BytesIO(data)
+    return pd.read_csv(buf, dtype=str) if name.lower().endswith(".csv") else pd.read_excel(buf, dtype=str)
+
+
+def _aged(reorder, tims, ns, receipts, as_at, tims_latest_month, review_m, clear_m):
+    """
+    Uploads -> compute(), cached as one step in render(): a click then costs a hash of the uploaded
+    bytes instead of re-reading every file (the TIMS receipts .xlsx alone is ~2s) and re-hashing frames.
+    """
+    rec = last_receipts([_read_upload(u) for u in receipts]) if receipts else None
+    df, has_cost = compute(_read_upload(reorder), _read_upload(tims), _read_upload(ns),
+                           as_at, tims_latest_month, review_m, clear_m, rec)
+    return df, has_cost, rec
+
+
 def render(reorder=None, tims_file=None, ns_file=None):
     """tims_file / ns_file: CSV file-likes already uploaded elsewhere in the app (skips our uploaders)."""
     import streamlit as st
@@ -220,8 +240,7 @@ def render(reorder=None, tims_file=None, ns_file=None):
     st.subheader("Aged Stock - Location 10")
     with st.expander("Files and settings", expanded=reorder is None):
         if reorder is None:
-            f = st.file_uploader("NetSuite Part Reorder Rpt (CSV)", type="csv", key="aged_reorder")
-            reorder = pd.read_csv(f, dtype=str) if f else None
+            reorder = st.file_uploader("NetSuite Part Reorder Rpt (CSV)", type="csv", key="aged_reorder")
         ft = tims_file or st.file_uploader("TIMS movement history (Dataset for forecasting 10)", type="csv", key="aged_tims")
         fn = ns_file or st.file_uploader("NetSuite sales history", type="csv", key="aged_ns")
         fr = st.file_uploader("Last receipt dates (optional, one or more files - e.g. NetSuite item receipts and "
@@ -243,10 +262,9 @@ def render(reorder=None, tims_file=None, ns_file=None):
         st.session_state.pop("aged_view", None)
         return
 
-    read = lambda f: pd.read_csv(f, dtype=str) if f.name.lower().endswith(".csv") else pd.read_excel(f, dtype=str)
-    receipts = last_receipts([read(f) for f in fr]) if fr else None
-    df, has_cost = st.cache_data(show_spinner="Ageing stock...")(compute)(reorder, pd.read_csv(ft, dtype=str), pd.read_csv(fn, dtype=str),
-                           as_at, tims_latest, review_m, clear_m, receipts)
+    up = lambda f: f if isinstance(f, pd.DataFrame) else (f.getvalue(), getattr(f, "name", "upload.csv"))
+    df, has_cost, receipts = st.cache_data(show_spinner="Ageing stock...")(_aged)(
+        up(reorder), up(ft), up(fn), tuple(up(f) for f in fr or ()), as_at, tims_latest, review_m, clear_m)
     st.session_state["aged_df"] = df  # read by Spare Parts Ordering for the DO NOT ORDER override
     if receipts is None:
         st.warning("No receipt dates loaded - stock received recently that hasn't sold yet is counted as aged, "
