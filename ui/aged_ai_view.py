@@ -7,6 +7,7 @@ from services.aged_ai import (
     AGED_SYSTEM_PROMPT,
     build_aged_summary,
     clearance_lines,
+    find_replacements,
     triage_clearance,
     write_promo_copy,
 )
@@ -63,15 +64,33 @@ def _render_triage(aged_df: pd.DataFrame, reorder_file) -> None:
         _show("aged_ai_triage", "clearance_triage.csv")
 
 
-def render_aged_ai(aged_df: pd.DataFrame, reorder_file=None) -> None:
+def _render_replacements(aged_df: pd.DataFrame, reorder_file, tims_csv, ns_csv) -> None:
+    with st.expander("🔁 Replacement parts for superseded stock"):
+        st.caption("Finds the replacement each aged line's description points to (REF / TRY / REPLACED BY / NOW), "
+                   "asks Claude only about the ones a pattern can't resolve, then checks whether the "
+                   "replacement is selling - if it is, sell the old stock against its demand.")
+        if reorder_file is None or tims_csv is None or ns_csv is None:
+            st.info("Needs the reorder report plus the TIMS and NetSuite sales history CSVs.")
+            return
+        if st.button("Find replacement parts", key="aged_repl_btn"):
+            ss = st.session_state
+            _run("Finding replacements", "aged_ai_repl", lambda: find_replacements(
+                aged_df, _read_raw(reorder_file), pd.read_csv(tims_csv, dtype=str), pd.read_csv(ns_csv, dtype=str),
+                ss["aged_asat"], ss["aged_tl"], ss.get("aged_rv", 6)))
+        _show("aged_ai_repl", "superseded_replacements.csv")
+
+
+def render_aged_ai(aged_df: pd.DataFrame, reorder_file=None, tims_csv=None, ns_csv=None) -> None:
     """
     AI tools for the Aged Stock tab. Every button is a deliberate, billed request.
     reorder_file: the uploaded Part Reorder Rpt (for supplier / item-list lookups).
+    tims_csv / ns_csv: file-likes of the TIMS and NetSuite sales history CSVs.
     """
     st.divider()
     st.markdown("### 🤖 AI Tools")
     _render_promo_copy(aged_df)
     _render_triage(aged_df, reorder_file)
+    _render_replacements(aged_df, reorder_file, tims_csv, ns_csv)
     render_ai_insights(
         aged_df,
         key_prefix="aged_",

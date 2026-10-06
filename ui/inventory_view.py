@@ -90,7 +90,12 @@ def render_inventory_mode() -> None:
             st.error(f"Aged stock couldn't run on these files: {e}")
 
         if "aged_df" in st.session_state:
-            render_aged_ai(st.session_state["aged_df"], inventory_file or st.session_state.get("aged_reorder"))
+            render_aged_ai(
+                st.session_state["aged_df"],
+                inventory_file or st.session_state.get("aged_reorder"),
+                _as_csv(forecast_file) or _as_csv(st.session_state.get("aged_tims")),
+                _as_csv(netsuite_sales_file) or _as_csv(st.session_state.get("aged_ns")),
+            )
 
     with purchasing_tab:
         _render_purchasing(inventory_file, forecast_file, netsuite_sales_file, backorder_file)

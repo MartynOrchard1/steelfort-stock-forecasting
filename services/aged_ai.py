@@ -4,9 +4,12 @@ ever sees a compact summary or a short list of lines (never the full
 15,000-line aged table), and nothing runs until someone clicks a button.
 """
 
+import difflib
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel
 
@@ -196,3 +199,105 @@ def triage_clearance(lines: pd.DataFrame) -> pd.DataFrame:
         results = pool.map(lambda c: _parse(client, TRIAGE_PROMPT, c, Triage).lines, chunks)
         triaged = [line for chunk in results for line in chunk]
     return _merge_by_part(lines, triaged, {"action": "Suggested_Action", "reason": "Action_Reason"})
+
+
+# Descriptions name replacements like "REF PPBB043", "(TRY 618P09970)*", "REPLACED BY MT9420616A".
+REPLACEMENT_HINT = re.compile(r"\b(?:REF|TRY|REPLACED BY|NOW)\b", re.I)
+REPLACEMENT_REF = re.compile(r"\b(?:REF:?|TRY|REPLACED BY|NOW)\s+([A-Z0-9][A-Z0-9\-/.]*\d[A-Z0-9\-/.]*)", re.I)
+REPLACEMENT_COLS = ["Part_Number", "Description", "Bucket", "Qty_On_Hand", "Stock_Value", "Months_Since_Move"]
+
+
+def superseded_lines(aged_df: pd.DataFrame, known: dict[str, str]) -> pd.DataFrame:
+    """
+    Aged lines whose description points at a replacement (or that aged_stock flags as superseded),
+    with Replacement filled in where a pattern finds a part number that exists in the item list.
+    known: upper-cased part number -> part number as spelled in the reorder report.
+    """
+    aged = aged_df[aged_df["Bucket"].isin(["Review", "Clearance"])]
+    lines = aged[aged["Description"].fillna("").str.contains(REPLACEMENT_HINT)
+                 | aged["Flags"].str.contains("superseded")][REPLACEMENT_COLS].copy()
+    lines["Ref_Token"] = (lines["Description"].fillna("").str.extract(REPLACEMENT_REF, expand=False)
+                          .fillna("").str.upper().str.rstrip("./-"))
+    lines["Replacement"] = lines["Ref_Token"].map(known).fillna("")
+    lines["Found_By"] = np.where(lines["Replacement"] != "", "Description", "")
+
+    # Descriptions often drop the item prefix ("REF 13120-004-0000" means MT13120-004-0000):
+    # take a suffix match when exactly one item in the list ends with the token.
+    for i in lines.index[(lines["Found_By"] == "") & (lines["Ref_Token"] != "")]:
+        matches = _ending_with(lines.at[i, "Ref_Token"], known)
+        if len(matches) == 1:
+            lines.loc[i, ["Replacement", "Found_By"]] = [matches[0], "Description (prefix added)"]
+    return lines
+
+
+class ReplacementLine(BaseModel):
+    part_number: str
+    replacement: str
+
+
+class Replacements(BaseModel):
+    lines: list[ReplacementLine]
+
+
+REPLACEMENT_PROMPT = """You read terse spare-part descriptions from Steelfort's item list and find the \
+replacement (superseding) part number each one points to, e.g. "REF PPBB043" -> PPBB043, or "TRY -805" on old part \
+MT717-04110 with similar part MT717-0805 listed -> MT717-0805. For every line return the part_number exactly as \
+given and replacement: the replacement part number, preferably one from Similar_Part_Numbers, or "" if the \
+description doesn't name a replacement (e.g. "NO LONGER AVAILABLE" with nothing else, or a note like "ONCE SOLD"). \
+Never guess a part number that isn't written in the description or listed in Similar_Part_Numbers."""
+
+
+def _ending_with(token: str, known: dict[str, str]) -> list[str]:
+    # ponytail: linear scan of the item list per token - fine for the few dozen superseded lines.
+    return [p for k, p in known.items() if k.endswith(token)] if len(token) >= 5 else []
+
+
+def _similar(part: str, token: str, known: dict[str, str], n: int = 10) -> str:
+    """Item-list candidates for Claude: items ending with the referenced token, then close spellings of it."""
+    close = difflib.get_close_matches(token or part.upper(), known, n=n, cutoff=0.7)
+    cands = _ending_with(token, known) + [known[k] for k in close]
+    return " ".join([p for p in dict.fromkeys(cands) if p != part][:n])
+
+
+def ai_resolve_replacements(lines: pd.DataFrame, known: dict[str, str]) -> pd.DataFrame:
+    """Ask Claude only about lines the pattern couldn't resolve. No call if there are none."""
+    todo = lines[lines["Found_By"] == ""]
+    if todo.empty:
+        return lines
+    content = todo[["Part_Number", "Description"]].assign(
+        Similar_Part_Numbers=[_similar(p, t, known) for p, t in zip(todo["Part_Number"], todo["Ref_Token"])]
+    ).to_csv(index=False)
+    result = _parse(require_client(), REPLACEMENT_PROMPT, content, Replacements)
+    # Only accept answers that exist in the item list - anything else is treated as not found.
+    answers = {r.part_number: known.get(r.replacement.strip().upper(), "") for r in result.lines}
+    resolved = todo["Part_Number"].map(answers).fillna("")
+    lines = lines.copy()
+    lines.loc[todo.index, "Replacement"] = resolved
+    lines.loc[todo.index, "Found_By"] = np.where(resolved != "", "Claude", "")
+    return lines
+
+
+def replacement_status(lines: pd.DataFrame, aged_df: pd.DataFrame, last_move: pd.Series,
+                       as_at, review_m: float = 6) -> pd.DataFrame:
+    """Is the replacement itself moving? That decides "sell old stock first" vs "write it off"."""
+    months = ((pd.Timestamp(as_at) - lines["Replacement"].map(last_move)).dt.days / 30.4375).round(1)
+    on_hand = aged_df.set_index("Part_Number")["Qty_On_Hand"]
+    return lines.assign(
+        Replacement_On_Hand=lines["Replacement"].map(on_hand).fillna(0),
+        Replacement_Months_Since_Move=months,
+        Replacement_Status=np.select(
+            [lines["Replacement"] == "", months.isna(), months < review_m],
+            ["No replacement found", "Replacement has no recorded movement",
+             "Replacement is selling - sell old stock against its demand"],
+            "Replacement is slow too - likely write off",
+        ),
+    )
+
+
+def find_replacements(aged_df, reorder, tims, ns, as_at, tims_latest_month, review_m=6) -> pd.DataFrame:
+    parts = reorder["Part_Number"].dropna().astype(str).str.strip()
+    known = dict(zip(parts.str.upper(), parts))
+    lines = ai_resolve_replacements(superseded_lines(aged_df, known), known)
+    last_move = pd.concat([aged_stock.ns_last_sale(ns),
+                           aged_stock.tims_last_move(tims, tims_latest_month)]).groupby(level=0).max()
+    return replacement_status(lines, aged_df, last_move, as_at, review_m)
