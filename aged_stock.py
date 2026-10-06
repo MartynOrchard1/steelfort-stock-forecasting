@@ -95,7 +95,8 @@ def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12,
     inv["Qty_On_Hand"] = _num(inv["Location On Hand"])
     inv = inv[inv["Qty_On_Hand"] > 0]
 
-    out = inv[["Part_Number", "Description", "Part Group"]].copy()
+    # Part Type / Supplier are optional in the export; Supplier is the first supplier row's, as above.
+    out = inv[["Part_Number", "Description", "Part Group"] + [c for c in ("Part Type", "Supplier") if c in inv]].copy()
     out["Qty_On_Hand"] = inv["Qty_On_Hand"]
     for src, dst in [("Location Committed", "Committed"), ("Location On Order", "On_Order"),
                      ("Location Back Ordered", "Back_Ordered"), ("Reorder Point", "Reorder_Point"),
