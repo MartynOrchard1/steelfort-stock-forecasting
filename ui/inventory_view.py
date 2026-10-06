@@ -9,9 +9,8 @@ from services.forecast_service import (
 from services.inventory_service import (
     apply_inventory_calculations,
     apply_inventory_filters,
-    clean_inventory_data_cached,
 )
-from services.spring_forecast_service import classify_spring_product_line
+from services.spring_forecast_service import load_inventory_with_spring_cached
 from services.backorder_service import load_backorder_report_cached
 from services.netsuite_sales_service import (
     MIN_EXPECTED_SALES_HISTORY_DAYS,
@@ -75,8 +74,7 @@ def render_inventory_mode() -> None:
     inventory_bytes, inventory_name = get_uploaded_file_bytes(inventory_file)
 
     with st.spinner("Loading inventory file..."):
-        inventory_df = clean_inventory_data_cached(inventory_bytes, inventory_name)
-        inventory_df = classify_spring_product_line(inventory_df)
+        inventory_df = load_inventory_with_spring_cached(inventory_bytes, inventory_name)
 
     forecast_df = None
     forecast_detail = None
