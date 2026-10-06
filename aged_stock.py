@@ -46,6 +46,31 @@ def ns_last_sale(ns):
     return pd.Series(d.values, index=ns["Part Number"].astype(str).str.strip(), name="Last_Sale_NS").groupby(level=0).max()
 
 
+PART_COLS = ["part_number", "part number", "item", "item name", "name", "ith_part", "part", "poref_part"]
+
+
+def last_receipts(frames):
+    """
+    Last receipt date per part at loc 10, from one or more receipt exports (e.g. a NetSuite Item
+    Receipt saved search and a TIMS receipts export). Each needs a part number column and a column
+    with "date" in its name; a Location / loc column, if present, is filtered to location 10.
+    """
+    found = []
+    for df in frames:
+        cols = {c.strip().lower(): c for c in df.columns}
+        part = next((cols[c] for c in PART_COLS if c in cols), None)
+        dates = [c for c in df.columns if "date" in c.lower()]
+        date = next((c for c in dates if re.search(r"recei|rcv|grn", c, re.I)), dates[0] if dates else None)
+        if part is None or date is None:
+            raise ValueError(f"Receipts file needs a part number and a date column - found: {list(df.columns)}")
+        loc = next((c for c in df.columns if "location" in c.lower() or c.strip().lower() in ("loc", "ith_loc")), None)
+        if loc is not None:
+            df = df[df[loc].astype(str).str.strip().str.match(LOC + r"\b")]
+        found.append(pd.Series(pd.to_datetime(df[date], dayfirst=True, errors="coerce").values,
+                               index=df[part].astype(str).str.strip()))
+    return pd.concat(found).dropna().groupby(level=0).max() if found else None
+
+
 def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12, receipts=None):
     """receipts: optional Series of part -> last receipt date at loc 10 (see last_receipts). Stock
     received after it last moved is aged from the receipt, so new stock isn't counted as dead."""
@@ -157,6 +182,9 @@ def render(reorder=None, tims_file=None, ns_file=None):
             reorder = pd.read_csv(f, dtype=str) if f else None
         ft = tims_file or st.file_uploader("TIMS movement history (Dataset for forecasting 10)", type="csv", key="aged_tims")
         fn = ns_file or st.file_uploader("NetSuite sales history", type="csv", key="aged_ns")
+        fr = st.file_uploader("Last receipt dates (optional, one or more CSVs - e.g. NetSuite item receipts and "
+                              "TIMS receipts; needs a part number and a date column)", type="csv",
+                              accept_multiple_files=True, key="aged_receipts")
         c1, c2, c3 = st.columns(3)
         as_at = c1.date_input("As-at date", date.today(), key="aged_asat")
         tims_latest = c2.date_input("TIMS latest month (ith_24)", date(2026, 7, 1), key="aged_tl",
@@ -172,9 +200,16 @@ def render(reorder=None, tims_file=None, ns_file=None):
         st.session_state.pop("aged_df", None)  # don't leave a stale override on the purchasing tab
         return
 
+    receipts = last_receipts([pd.read_csv(f, dtype=str) for f in fr]) if fr else None
     df, has_cost = st.cache_data(show_spinner="Ageing stock...")(compute)(reorder, pd.read_csv(ft, dtype=str), pd.read_csv(fn, dtype=str),
-                           as_at, tims_latest, review_m, clear_m)
-    st.session_state["aged_df"] = df  # read by the purchasing tab for the DO NOT ORDER override
+                           as_at, tims_latest, review_m, clear_m, receipts)
+    st.session_state["aged_df"] = df  # read by Spare Parts Ordering for the DO NOT ORDER override
+    if receipts is None:
+        st.warning("No receipt dates loaded - stock received recently that hasn't sold yet is counted as aged, "
+                   "so Review / Clearance are overstated. Add receipt exports under Files and settings.")
+    else:
+        st.caption(f"Receipt dates loaded for {len(receipts):,} parts (latest {receipts.max():%d/%m/%Y}); "
+                   f"{df['Age_Basis'].str.startswith('Received').sum():,} on-hand lines aged from their receipt.")
     if not has_cost:
         st.warning("No cost column found (e.g. 'Average Cost') - showing quantities only, sorted by qty. "
                    "Add Average Cost to the Part Reorder Rpt saved search to get stock values.")
