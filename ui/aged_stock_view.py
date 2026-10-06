@@ -25,5 +25,6 @@ def render_aged_stock_mode() -> None:
 
     ss = st.session_state
     if "aged_df" in ss:
-        render_aged_ai(ss["aged_df"], ss.get("aged_reorder"),
+        # AI tools follow the Filters panel; the DO NOT ORDER override keeps using the full aged_df.
+        render_aged_ai(ss.get("aged_view", ss["aged_df"]), ss.get("aged_reorder"),
                        _fresh_copy(ss.get("aged_tims")), _fresh_copy(ss.get("aged_ns")))
