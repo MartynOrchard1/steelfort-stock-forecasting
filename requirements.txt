@@ -1,5 +1,10 @@
-streamlit>=1.46
-pandas
-openpyxl
-numpy
-anthropic
+# Pinned to the versions the app is tested with, so a deploy or Docker build can't silently pick
+# up a new release. Bump deliberately, run the tests, and let CI's pip-audit check the result.
+streamlit==1.55.0
+pandas==2.3.3
+openpyxl==3.1.5
+anthropic==1.0.0
+pydantic==2.12.5
+# numpy 2.3+ needs Python 3.11+; a range keeps a Python 3.10 host (e.g. a Streamlit Cloud app
+# set to 3.10) installable.
+numpy>=2.2,<3
