@@ -18,7 +18,7 @@ from services.ai_insights import MODEL, get_client
 
 MAX_ROWS_LISTED = 20
 AGED_COLS = ["Part_Number", "Description", "Part Group", "Qty_On_Hand", "Stock_Value",
-             "Age_Months", "Last_Receipt", "Bucket", "Flags"]
+             "Age_Months", "Last_Sale", "Last_Receipt", "Bucket", "Flags"]
 
 
 def _value_col(df: pd.DataFrame) -> str:
@@ -37,8 +37,8 @@ def build_aged_summary(df: pd.DataFrame) -> str:
         return "No aged stock data is currently loaded."
 
     aged = df[df["Bucket"].isin(["Review", "Clearance"])]
-    received = int(df["Last_Receipt"].notna().sum()) if "Last_Receipt" in df else 0
-    parts = [f"Receipt dates loaded: {'yes, ' + format(received, ',') + ' lines have one' if received else 'no'}",
+    ns_received = int(df["Last_Receipt_NS"].notna().sum()) if "Last_Receipt_NS" in df else 0
+    parts = [f"NetSuite receipt dates loaded: {'yes, ' + format(ns_received, ',') + ' lines have one' if ns_received else 'no'}",
              "Bucket summary (CSV - Lines, Qty on hand, Stock Value $):",
              aged_stock.summary(df).round(0).to_csv()]
 
@@ -68,11 +68,11 @@ def build_aged_summary(df: pd.DataFrame) -> str:
 
 AGED_SYSTEM_PROMPT = """You are an inventory assistant for Steelfort's spare parts department (location 10). \
 You're given a summarised snapshot of their aged stock analysis - aggregates and the biggest lines, not the full \
-dataset. Age_Months is months since the later of the part's last movement (its last NetSuite sale or last month \
-with positive TIMS movement - TIMS may include transfers) and its last receipt, when receipt dates are loaded. \
-Without receipt dates, stock received recently but not sold yet counts as aged, so the totals are overstated - say \
-so if the summary shows none were loaded. Buckets: Active = under 6 months; Review = 6-12 months, candidate for a portal special or flyer; Clearance = 12+ months, \
-automatically set to DO NOT ORDER in purchasing; Check data = no history anywhere (possibly a new item). \
+dataset. Age_Months is months since the later of the part's last sale and its last receipt (TIMS history back to \
+2015, plus NetSuite since go-live in Aug 2026); transfers and stock adjustments don't count. Without the NetSuite \
+receipt dates, stock received since go-live but not sold yet counts as aged - say so if the summary shows none were \
+loaded. Buckets: Active = under 6 months; Review = 6-12 months, candidate for a portal special or flyer; Clearance = 12+ months, \
+automatically set to DO NOT ORDER in purchasing; Check data = no history anywhere (possibly a new item). Stock with no sale or receipt since TIMS records began (2015) is Clearance, and its age is a minimum. \
 "Conflict" lines are aged but still committed, on order or back ordered - worth checking before discounting. Lines \
 with a reorder point will keep being reordered by NetSuite until the reorder point is removed.
 
@@ -180,13 +180,13 @@ TRIAGE_PROMPT = """You help Steelfort's spare parts department (outdoor power eq
 - "Write off / scrap": obsolete, superseded, damaged-sounding, or worth too little to handle.
 - "Keep as insurance spare": slow but critical - a customer would be stuck without it and it's hard to get quickly (e.g. engine, transmission, steering or electronic control parts for machines still in use).
 
-Base it only on the line's description, part group, supplier, quantity, value and age. Months_Since_Move is a minimum when Flags says so. Prefer "Keep as insurance spare" only when the part is genuinely critical, not just expensive. Stock can't be sent back to suppliers, so never suggest that in a reason."""
+Base it only on the line's description, part group, supplier, quantity, value and age. Age_Months is months since it last sold or was received; Last_Sale is blank if it never sold. Prefer "Keep as insurance spare" only when the part is genuinely critical, not just expensive. Stock can't be sent back to suppliers, so never suggest that in a reason."""
 
 # Small batches run in parallel: 100 triage lines went from ~80s (2 x 50) to ~35s (5 x 20).
 CHUNK = 20  # lines per request
 PARALLEL = 8  # requests at once
 TRIAGE_COLS = ["Part_Number", "Description", "Part Group", "Supplier", "Qty_On_Hand", "Unit_Cost",
-               "Stock_Value", "Months_Since_Move", "Flags"]
+               "Stock_Value", "Age_Months", "Last_Sale", "Flags"]
 
 
 def clearance_lines(aged_df: pd.DataFrame, reorder: pd.DataFrame | None, top_n: int) -> pd.DataFrame:
@@ -234,7 +234,7 @@ REPLACEMENT_REF = re.compile(r"\b(?:REF:?|TRY|REPLACED BY|NOW)\s+" + PART, re.I)
 NOTES_HINT = re.compile(r"\b(?:REF|REFER|REFERRED|SUPERSEDE[DS]?|SUPERCEDE[DS]?|REPLACED BY|TRY|NOW|USE P/?N)\b", re.I)
 NOTES_REF = re.compile(r"(?:^|\|)[^A-Z0-9|]*(?:(?:WHEN|ONCE)\s+SOLD\s+REF(?:ER)?|SUPER[SC]EDE[DS]?\s+(?:TO|BY)"
                        r"|REPLACED\s+BY)\s*[:\-]?\s*" + PART, re.I)
-REPLACEMENT_COLS = ["Part_Number", "Description", "Bucket", "Qty_On_Hand", "Stock_Value", "Months_Since_Move"]
+REPLACEMENT_COLS = ["Part_Number", "Description", "Bucket", "Qty_On_Hand", "Stock_Value", "Age_Months"]
 
 
 def _tokens(text: pd.Series, pattern: re.Pattern) -> pd.Series:
@@ -333,32 +333,33 @@ def ai_resolve_replacements(lines: pd.DataFrame, known: dict[str, str]) -> pd.Da
     return lines
 
 
-def replacement_status(lines: pd.DataFrame, aged_df: pd.DataFrame, last_move: pd.Series,
+def replacement_status(lines: pd.DataFrame, aged_df: pd.DataFrame, last_sale: pd.Series,
                        as_at, review_m: float = 6) -> pd.DataFrame:
-    """Is the replacement itself moving? That decides "sell old stock first" vs "write it off"."""
-    months = ((pd.Timestamp(as_at) - lines["Replacement"].map(last_move)).dt.days / 30.4375).round(1)
+    """Is the replacement itself selling? That decides "sell old stock first" vs "write it off"."""
+    months = ((pd.Timestamp(as_at) - lines["Replacement"].map(last_sale)).dt.days / 30.4375).round(1)
     on_hand = aged_df.set_index("Part_Number")["Qty_On_Hand"]
     # Found in the notes (or by Claude) but the description doesn't say REF yet - fix it in NetSuite.
     needs_ref = (lines["Replacement"] != "") & ~lines["Description"].fillna("").str.contains(r"\bREF(?:ER)?\b", case=False)
     return lines.assign(
         Needs_REF=np.where(needs_ref, "REF to " + lines["Replacement"], ""),
         Replacement_On_Hand=lines["Replacement"].map(on_hand).fillna(0),
-        Replacement_Months_Since_Move=months,
+        Replacement_Months_Since_Sale=months,
         Replacement_Status=np.select(
             [lines["Replacement"] == "", months.isna(), months < review_m],
-            ["No replacement found", "Replacement has no recorded movement",
+            ["No replacement found", "Replacement has no recorded sale",
              "Replacement is selling - sell old stock against its demand"],
             "Replacement is slow too - likely write off",
         ),
     )
 
 
-def find_replacements(aged_df, reorder, tims, ns, as_at, tims_latest_month, review_m=6) -> pd.DataFrame:
+def find_replacements(aged_df, reorder, tims_usage, ns, as_at, review_m=6) -> pd.DataFrame:
+    """tims_usage: the raw TIMS last-usage export; ns: the NetSuite sales history."""
     reorder = reorder.assign(Part_Number=reorder["Part_Number"].astype(str).str.strip()).drop_duplicates("Part_Number")
     known = dict(zip(reorder["Part_Number"].str.upper(), reorder["Part_Number"]))
     notes_col = next((c for c in reorder.columns if "note" in c.lower()), None)  # "NOTES" in the current export
     notes = dict(zip(reorder["Part_Number"], reorder[notes_col].fillna("").astype(str))) if notes_col else {}
     lines = ai_resolve_replacements(superseded_lines(aged_df, known, notes), known)
-    last_move = pd.concat([aged_stock.ns_last_sale(ns),
-                           aged_stock.tims_last_move(tims, tims_latest_month)]).groupby(level=0).max()
-    return replacement_status(lines, aged_df, last_move, as_at, review_m)
+    last_sale = pd.concat([aged_stock.ns_last_sale(ns),
+                           aged_stock.tims_last_usage(tims_usage)["Last_Sale_TIMS"]]).dropna().groupby(level=0).max()
+    return replacement_status(lines, aged_df, last_sale, as_at, review_m)
