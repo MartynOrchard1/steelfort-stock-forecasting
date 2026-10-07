@@ -1,10 +1,23 @@
 import pandas as pd
 import streamlit as st
 
-from services.ai_insights import ask_ai, build_data_summary
+from services.ai_insights import SYSTEM_PROMPT, ask_ai, build_data_summary
+
+SUMMARY_REQUEST = (
+    "Give me a short summary of what needs attention today, then "
+    "call out anything that looks like an anomaly or worth a "
+    "second look (e.g. a supplier with an unusual share of "
+    "urgent items, an unusually large backorder, etc)."
+)
 
 
-def render_ai_insights(df: pd.DataFrame, key_prefix: str = "") -> None:
+def render_ai_insights(
+    df: pd.DataFrame,
+    key_prefix: str = "",
+    summary_fn=build_data_summary,
+    system_prompt: str = SYSTEM_PROMPT,
+    summary_request: str = SUMMARY_REQUEST,
+) -> None:
     """
     AI Insights panel: an on-demand summary/anomaly button plus a small
     follow-up chat, both grounded in a compact summary of the currently
@@ -18,6 +31,9 @@ def render_ai_insights(df: pd.DataFrame, key_prefix: str = "") -> None:
     once on the same page (e.g. one per tab in Units Ordering) - keeps each
     instance's widget keys and chat history independent so Streamlit
     doesn't collide their auto-generated element IDs.
+
+    summary_fn / system_prompt / summary_request: swap these to point the
+    same panel at a different dataset (e.g. the Aged Stock tab).
     """
     st.markdown("### 🤖 AI Insights")
 
@@ -29,19 +45,12 @@ def render_ai_insights(df: pd.DataFrame, key_prefix: str = "") -> None:
 
     if col1.button(
         "Generate summary & flag anomalies",
-        use_container_width=True,
+        width="stretch",
         key=f"{key_prefix}ai_generate_summary",
     ):
         with st.spinner("Asking Claude..."):
-            summary = build_data_summary(df)
-            answer = ask_ai(
-                summary,
-                st.session_state[history_key],
-                "Give me a short summary of what needs attention today, then "
-                "call out anything that looks like an anomaly or worth a "
-                "second look (e.g. a supplier with an unusual share of "
-                "urgent items, an unusually large backorder, etc).",
-            )
+            summary = summary_fn(df)
+            answer = ask_ai(summary, st.session_state[history_key], summary_request, system_prompt)
         st.session_state[history_key].append({
             "role": "user", "content": "Summarize and flag anomalies.",
         })
@@ -49,7 +58,7 @@ def render_ai_insights(df: pd.DataFrame, key_prefix: str = "") -> None:
             "role": "assistant", "content": answer,
         })
 
-    if col2.button("Clear chat", use_container_width=True, key=f"{key_prefix}ai_clear_chat"):
+    if col2.button("Clear chat", width="stretch", key=f"{key_prefix}ai_clear_chat"):
         st.session_state[history_key] = []
 
     for turn in st.session_state[history_key]:
@@ -64,8 +73,8 @@ def render_ai_insights(df: pd.DataFrame, key_prefix: str = "") -> None:
         with st.chat_message("user"):
             st.write(user_question)
         with st.spinner("Asking Claude..."):
-            summary = build_data_summary(df)
-            answer = ask_ai(summary, st.session_state[history_key], user_question)
+            summary = summary_fn(df)
+            answer = ask_ai(summary, st.session_state[history_key], user_question, system_prompt)
         st.session_state[history_key].append({"role": "user", "content": user_question})
         st.session_state[history_key].append({"role": "assistant", "content": answer})
         with st.chat_message("assistant"):

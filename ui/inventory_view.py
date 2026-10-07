@@ -9,9 +9,8 @@ from services.forecast_service import (
 from services.inventory_service import (
     apply_inventory_calculations,
     apply_inventory_filters,
-    clean_inventory_data_cached,
 )
-from services.spring_forecast_service import classify_spring_product_line
+from services.spring_forecast_service import load_inventory_with_spring_cached
 from services.backorder_service import load_backorder_report_cached
 from services.netsuite_sales_service import (
     MIN_EXPECTED_SALES_HISTORY_DAYS,
@@ -21,8 +20,10 @@ from ui.ai_insights_view import render_ai_insights
 from ui.dialogs import show_part_details_dialog
 from ui.filters import render_grouping_filters
 from utils.helpers import (
+    csv_for_download,
     get_forecast_month_columns_newest_first,
     get_uploaded_file_bytes,
+    normalize_part_number,
 )
 
 from ui.demand_trend_preview import render_demand_trend_preview
@@ -74,8 +75,7 @@ def render_inventory_mode() -> None:
     inventory_bytes, inventory_name = get_uploaded_file_bytes(inventory_file)
 
     with st.spinner("Loading inventory file..."):
-        inventory_df = clean_inventory_data_cached(inventory_bytes, inventory_name)
-        inventory_df = classify_spring_product_line(inventory_df)
+        inventory_df = load_inventory_with_spring_cached(inventory_bytes, inventory_name)
 
     forecast_df = None
     forecast_detail = None
@@ -250,6 +250,25 @@ def render_inventory_mode() -> None:
         df["Back Ordered"] = 0
         df["Backorder Customers"] = 0
 
+    # Aged stock feedback: Clearance parts (12+ months no movement at loc 10)
+    # are never ordered, whatever the demand / backorder maths above said.
+    # Base Recommended Order keeps the pre-override qty so these still show
+    # under "Only items needing order". aged_df comes from Aged Stock mode
+    # earlier in this session.
+    df["Order Reason"] = ""
+    aged_df = st.session_state.get("aged_df")
+    if aged_df is not None:
+        override = dict(zip(normalize_part_number(aged_df["Part_Number"]), aged_df["Aged_Order_Override"]))
+        do_not_order = df["Part_Number"].map(override).eq("DO NOT ORDER")
+        df.loc[do_not_order, "Priority V2"] = "⛔ DO NOT ORDER"
+        df.loc[do_not_order, "Recommended Order"] = 0
+        df.loc[do_not_order, "Order Reason"] = "Aged stock - 12+ months no movement"
+        st.caption(f"⛔ Aged stock override on: {do_not_order.sum():,} rows set to DO NOT ORDER "
+                   "(Clearance parts from Aged Stock mode).")
+    else:
+        st.caption("Aged stock override off - run Aged Stock mode first to block Clearance parts "
+                   "(12+ months no movement) with DO NOT ORDER.")
+
     col1, col2, col3, col4, col5 = st.columns([2, 2, 1.5, 1, 1])
 
     main_filter_values = sorted(
@@ -353,7 +372,7 @@ def render_inventory_mode() -> None:
     simple_review_columns = [
         "Part_Number", "Description", "POREF_SUPP", "Part Group", "Part Type", "Spring Category", "Qty on hand",
         "Qty Allocated", "Qty on Order", "Available", "Net After POs",
-        "Back Ordered", "Recommended Order", "Priority V2"
+        "Back Ordered", "Recommended Order", "Priority V2", "Order Reason"
     ]
     simple_review_columns = [c for c in simple_review_columns if c in filtered.columns]
 
@@ -365,7 +384,7 @@ def render_inventory_mode() -> None:
         "Effective Min", "Max", "Demand_Per_Month_Used", "Forecast Average",
         "Forecast Months Used", "Target Stock", "Base Recommended Order",
         "Recommended Order", "EOQ", "6mAvg", "6mUsage", "12mAvg", "12mUsage",
-        "Back Ordered", "Backorder Customers", "Priority V2", "Forecast Matched?",
+        "Back Ordered", "Backorder Customers", "Priority V2", "Order Reason", "Forecast Matched?",
         "NetSuite Qty Sold", "NetSuite Revenue Sold", "NetSuite Last Sale Date",
     ]
     detailed_review_columns = [c for c in detailed_review_columns if c in filtered.columns]
@@ -412,7 +431,7 @@ def render_inventory_mode() -> None:
         selected_part_number=selected_part_number,
     )
 
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+    csv_bytes = csv_for_download(filtered)
     st.download_button(
         "⬇️ Download Order CSV",
         data=csv_bytes,

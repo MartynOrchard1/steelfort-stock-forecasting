@@ -12,7 +12,7 @@ from services.inventory_service import (
 )
 from ui.ai_insights_view import render_ai_insights
 from ui.filters import apply_grouping_filters, render_grouping_filters
-from utils.helpers import get_forecast_month_columns_newest_first, get_uploaded_file_bytes
+from utils.helpers import get_forecast_month_columns_newest_first, get_uploaded_file_bytes, csv_for_download
 
 # Same NetSuite item-export shape as Units/Spare Parts (Part_Number, Supplier,
 # Location On Hand, Reorder Point, Preferred Stock Level, etc.), scoped to
@@ -239,7 +239,7 @@ def _render_demand_forecast_tab(
 
     st.dataframe(filtered[display_columns], width="stretch", hide_index=True)
 
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+    csv_bytes = csv_for_download(filtered)
     st.download_button(
         "⬇️ Download POC Demand Forecast Check CSV",
         data=csv_bytes,
@@ -365,7 +365,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backordered_loaded: bool) -> Non
 
     st.dataframe(filtered_display, width="stretch", hide_index=True)
 
-    csv_bytes = filtered_display.to_csv(index=False).encode("utf-8")
+    csv_bytes = csv_for_download(filtered_display)
     st.download_button(
         "⬇️ Download POC Reorder Point Check CSV",
         data=csv_bytes,

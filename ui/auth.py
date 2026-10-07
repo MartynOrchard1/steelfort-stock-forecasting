@@ -1,4 +1,11 @@
+import hmac
+import time
+
 import streamlit as st
+
+MAX_ATTEMPTS = 5
+LOCKOUT_SECONDS = 15 * 60
+FAIL_DELAY_SECONDS = 1  # slows guessing from a single session
 
 
 def require_login() -> None:
@@ -26,15 +33,30 @@ def require_login() -> None:
         )
         st.stop()
 
+    # Lockout is per browser session: Streamlit can't reliably tell clients apart by IP (on
+    # Streamlit Cloud they may all share a proxy address, so an IP lockout could lock out every
+    # user at once). It stops casual guessing; a long random password is the real protection.
+    now = time.time()
+    fails = [t for t in st.session_state.get("login_failures", []) if now - t < LOCKOUT_SECONDS]
+    st.session_state["login_failures"] = fails
+    if len(fails) >= MAX_ATTEMPTS:
+        minutes = int((LOCKOUT_SECONDS - (now - fails[0])) // 60) + 1
+        st.error(f"Too many incorrect passwords. Try again in {minutes} minute(s).")
+        st.stop()
+
     with st.form("login_form"):
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Log in")
 
     if submitted:
-        if password == correct_password:
+        # compare_digest: the check takes the same time however much of the password matches
+        if hmac.compare_digest(password.encode(), str(correct_password).encode()):
             st.session_state["authenticated"] = True
+            st.session_state.pop("login_failures", None)
             st.rerun()
         else:
+            time.sleep(FAIL_DELAY_SECONDS)
+            st.session_state["login_failures"] = fails + [now]
             st.error("Incorrect password.")
 
     st.stop()
