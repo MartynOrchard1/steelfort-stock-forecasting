@@ -20,6 +20,7 @@ from ui.ai_insights_view import render_ai_insights
 from ui.dialogs import show_part_details_dialog
 from ui.filters import render_grouping_filters
 from utils.helpers import (
+    csv_for_download,
     get_forecast_month_columns_newest_first,
     get_uploaded_file_bytes,
     normalize_part_number,
@@ -430,7 +431,7 @@ def render_inventory_mode() -> None:
         selected_part_number=selected_part_number,
     )
 
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+    csv_bytes = csv_for_download(filtered)
     st.download_button(
         "⬇️ Download Order CSV",
         data=csv_bytes,

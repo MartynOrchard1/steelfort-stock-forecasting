@@ -13,6 +13,7 @@ from services.aged_ai import (
 )
 from services.file_loader import load_file_from_bytes
 from ui.ai_insights_view import render_ai_insights
+from utils.helpers import csv_for_download
 
 
 def _run(label: str, state_key: str, fn) -> None:
@@ -28,7 +29,7 @@ def _show(state_key: str, file_name: str) -> None:
     result = st.session_state.get(state_key)
     if result is not None:
         st.dataframe(result, width="stretch", hide_index=True)
-        st.download_button("Download CSV", result.to_csv(index=False).encode("utf-8"),
+        st.download_button("Download CSV", csv_for_download(result),
                            file_name, "text/csv", key=f"{state_key}_dl")
 
 

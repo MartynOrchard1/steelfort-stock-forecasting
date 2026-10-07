@@ -81,4 +81,20 @@ assert ids(groups=["G1"], types=["T2"]) == ["C3"] and ids(suppliers=["S2"]) == [
 assert ids(flags=["Obsolete part group"]) == ["A1", "C3"] and ids(bases=["No movement"]) == ["B2", "C3"]
 assert ids(age=(12, 20)) == ["C3"] and ids(min_value=100) == ["B2"]
 assert ids(search="washer") == ["B2"] and ids(search="c3") == ["C3"]
+# Exports: text that Excel would run as a formula comes out as text.
+import io as _io
+import openpyxl
+from aged_stock import portal_list, to_excel
+from utils.helpers import csv_for_download, spreadsheet_safe
+bad = pd.DataFrame({"Part_Number": ["P1", "P2"], "Description": ['=HYPERLINK("http://x","y")', "- STRAP ONLY"],
+                    "Qty": [-3, 4], "Note": [None, "@SUM(A1)"]})
+safe = spreadsheet_safe(bad)
+assert list(safe["Description"]) == ["'" + bad.at[0, "Description"], "'- STRAP ONLY"] and safe.at[1, "Note"] == "'@SUM(A1)"
+assert list(safe["Qty"]) == [-3, 4] and safe.at[0, "Part_Number"] == "P1" and pd.isna(safe.at[0, "Note"])  # numbers / plain text untouched
+assert csv_for_download(bad)().decode().count("'=HYPERLINK") == 1
+x = df.copy(); x.loc[x.index[0], "Description"] = "=1+1"
+wb = openpyxl.load_workbook(_io.BytesIO(to_excel(x, portal_list(x, 5, 15, 30, True), True)))
+cells = [c for ws in wb for row in ws.iter_rows() for c in row if isinstance(c.value, str) and "1+1" in c.value]
+assert cells and all(c.data_type == "s" for c in cells), [(c.value, c.data_type) for c in cells]  # text, not formula
+
 print("ok")

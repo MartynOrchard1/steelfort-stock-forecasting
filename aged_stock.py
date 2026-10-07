@@ -205,6 +205,9 @@ def portal_list(df, top_n, disc_review, disc_clear, has_cost):
 
 
 def to_excel(df, portal, has_cost):
+    from utils.helpers import spreadsheet_safe
+
+    df, portal = spreadsheet_safe(df), spreadsheet_safe(portal)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         summary(df).to_excel(xw, sheet_name="Summary")
