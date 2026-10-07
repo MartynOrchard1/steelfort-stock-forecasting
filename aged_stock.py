@@ -25,10 +25,14 @@ def _num(s):
 
 def _dates(s):
     """dd/mm/yyyy (NetSuite) or ISO yyyy-mm-dd (SQL exports). dayfirst alone reads ISO 2026-02-03 as 2 March."""
-    s = s.astype(str).str.strip()
-    iso = s.str.match(r"\d{4}-\d{2}-\d{2}")
-    out = pd.to_datetime(s.where(~iso), dayfirst=True, errors="coerce")
+    # Blanks are skipped: the TIMS last-usage export is mostly empty cells, and parsing those as text
+    # fell back to slow per-cell parsing (with a warning per column).
+    s = s.astype("string").str.strip()
+    iso = s.str.match(r"\d{4}-\d{2}-\d{2}").fillna(False).astype(bool)
+    other = s.notna() & (s != "") & ~iso
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
     out[iso] = pd.to_datetime(s[iso], format="ISO8601", errors="coerce")
+    out[other] = pd.to_datetime(s[other], dayfirst=True, errors="coerce")
     return out
 
 
