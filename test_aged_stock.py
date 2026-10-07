@@ -1,5 +1,5 @@
 import pandas as pd
-from aged_stock import compute, TIMS_COLS
+from aged_stock import compute, tims_last_usage
 
 RCOLS = ["Location Committed", "Location On Order", "Location Back Ordered", "Reorder Point", "Preferred Stock Level"]
 
@@ -11,45 +11,56 @@ def row(part, oh, desc="X", **kw):
     return r
 
 
-def tims(part, last_pos):  # last_pos = ith index (1-24) of last positive month, None = no movement
-    r = {"ith_part": part, "ith_loc": "10", **{c: "0" for c in TIMS_COLS}}
-    if last_pos:
-        r[f"ith_{last_pos:02d}"] = "3"
-    return r
+def usage(part, sale=None, rec=None, trf=None, adj=None, loc="10"):  # the TIMS last-usage export, as IT supplied it
+    iso = lambda d: f"{d} 00:00:00" if d else None
+    return {"# ITM_Part": part, "xp_type": "PP", "ITM_Loc": loc, "Last_Rec": iso(rec), "Last_Adj": iso(adj),
+            "Last_Trf": iso(trf), "Last_Sale": iso(sale)}
 
 
 reorder = pd.DataFrame([
-    row("NS", 2), row("T24", 1), row("T18", 1), row("T10", 1), row("NONE", 5), row("NEW", 1),
-    row("ZERO", 0), row("COMMIT", 1, **{"Location Committed": "1"}), row("NS", 2),  # duplicate supplier row
+    row("NS", 2), row("T24", 1), row("T18", 1), row("T10", 1), row("NONE", 5), row("TRF", 1), row("RECV", 1),
+    row("NEW", 1), row("ZERO", 0), row("COMMIT", 1, **{"Location Committed": "1"}), row("NS", 2),  # dup supplier row
 ])
-t = pd.DataFrame([tims("NS", 2), tims("T24", 24), tims("T18", 18), tims("T10", 10), tims("NONE", None),
-                  tims("COMMIT", 10)])
+u = tims_last_usage(pd.DataFrame([
+    usage("NS", sale="2024-03-01"), usage("T24", sale="2026-07-15"), usage("T18", sale="2026-02-01"),
+    usage("T18", sale="2026-07-30", loc="DC"),                        # other location ignored
+    usage("T10", sale="2025-05-15"), usage("NONE", adj="2026-05-01"),  # adjustment only: doesn't count
+    usage("TRF", trf="2026-06-10"),                                    # transfer only: doesn't count
+    usage("RECV", sale="2023-01-01", rec="2026-06-01"), usage("COMMIT", sale="2024-11-01"),
+    usage("OLDEST", rec="2015-01-06"),                                 # earliest date = TIMS records start
+]))
 ns = pd.DataFrame({"Location": ["10 - PALM NTH PARTS DEP", "DC - PALM NTH DC"], "Part Number": ["NS", "T10"],
                    "Last Sale Date": ["15/09/2026", "15/09/2026"]})  # DC sale must be ignored
 
-df, has_cost = compute(reorder, t, ns, "2026-10-07", "2026-07-01")
-b = df.set_index("Part_Number")["Bucket"]
+df, has_cost = compute(reorder, ns, u, "2026-10-07")
+d = df.set_index("Part_Number")
+b = d["Bucket"]
 assert has_cost
-assert "ZERO" not in b and len(df) == 7, df
-assert b["NS"] == "Active" and b["T24"] == "Active"     # sale Sep 26 / Jul 26
-assert b["T18"] == "Review"                              # Jan 26 -> ~8 months
-assert b["T10"] == "Clearance"                           # May 25, DC sale ignored
-assert b["NONE"] == "Clearance" and b["NEW"] == "Check data"
-c = df.set_index("Part_Number").loc["COMMIT"]
-assert c["Conflict"] and "Committed" in c["Flags"] and c["Aged_Order_Override"] == "DO NOT ORDER"
-assert df.set_index("Part_Number").at["NONE", "Stock_Value"] == 50
+assert "ZERO" not in b and len(df) == 9, df
+assert b["NS"] == "Active" and d.at["NS", "Age_Basis"] == "Last sale"   # NetSuite sale beats the older TIMS one
+assert b["T24"] == "Active" and b["T18"] == "Review"                   # Jul 26 / Feb 26 (~8 months); DC row ignored
+assert b["T10"] == "Clearance"                                          # May 25, DC NetSuite sale ignored
+assert b["NONE"] == "Clearance" and b["TRF"] == "Clearance"             # adjustments / transfers don't age stock
+assert d.at["NONE", "Age_Basis"].startswith("No sale or receipt since TIMS records began (2015)")
+assert d.at["NONE", "Age_Months"] == 141.0 and pd.isna(d.at["NONE", "Months_Since_Sale"])  # minimum: since Jan 2015
+assert d.at["TRF", "Last_Transfer"] == pd.Timestamp("2026-06-10")       # shown for context
+assert b["RECV"] == "Active" and d.at["RECV", "Age_Basis"].startswith("Received after last sale")
+assert d.at["RECV", "Months_Since_Sale"] > 40                           # still shows how long since it sold
+assert b["NEW"] == "Check data"                                         # not in TIMS, nothing in NetSuite
+c = d.loc["COMMIT"]
+assert c["Bucket"] == "Clearance" and c["Conflict"] and "Committed" in c["Flags"] and c["Aged_Order_Override"] == "DO NOT ORDER"
+assert d.at["NONE", "Stock_Value"] == 50
 
-# Receipts: stock received after it last moved is aged from the receipt.
-receipts = pd.Series(pd.to_datetime(["2026-06-01", "2025-01-15", "2026-09-01"]), index=["NONE", "NEW", "T24"])
-r = compute(reorder, t, ns, "2026-10-07", "2026-07-01", receipts=receipts)[0].set_index("Part_Number")
-assert r.at["NONE", "Bucket"] == "Active" and r.at["NONE", "Age_Basis"].startswith("Received")  # was Clearance
-assert r.at["NEW", "Bucket"] == "Clearance"            # was Check data: received 21 months ago, never sold
-assert r.at["T24", "Bucket"] == "Active" and r.at["T10", "Bucket"] == "Clearance"  # untouched
-assert r.at["NONE", "Months_Since_Move"] == df.set_index("Part_Number").at["NONE", "Months_Since_Move"]
-# A receipt from before the TIMS window can't age a no-movement part past the window (it may have sold in between).
-old = compute(reorder, t, ns, "2026-10-07", "2026-07-01", receipts=pd.Series([pd.Timestamp("2016-03-01")], index=["NONE"]))[0]
-o = old.set_index("Part_Number").loc["NONE"]
-assert o["Age_Months"] == o["Months_Since_Move"] == 26.2 and o["Age_Basis"].startswith("No movement"), o
+# NetSuite receipts (since go-live) age stock from the receipt too.
+receipts = pd.Series(pd.to_datetime(["2025-01-15", "2026-09-01"]), index=["NEW", "T10"])
+r = compute(reorder, ns, u, "2026-10-07", receipts=receipts)[0].set_index("Part_Number")
+assert r.at["NEW", "Bucket"] == "Clearance" and r.at["NEW", "Age_Basis"].startswith("Received")  # was Check data
+assert r.at["T10", "Bucket"] == "Active" and r.at["T18", "Bucket"] == "Review"  # T18 untouched
+try:
+    tims_last_usage(pd.DataFrame({"# ITM_Part": ["X"], "Last_Rec": ["2020-01-01"]}))
+    raise AssertionError("missing Last_Sale should raise")
+except ValueError:
+    pass
 
 # Receipt files: NetSuite-style (Item / Date / Location) and TIMS-style (ith_part / Last Received Date), loc 10 only.
 from aged_stock import last_receipts

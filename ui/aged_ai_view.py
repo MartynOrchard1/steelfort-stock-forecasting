@@ -68,34 +68,35 @@ def _render_triage(aged_df: pd.DataFrame, reorder_file) -> None:
         _show("aged_ai_triage", "clearance_triage.csv")
 
 
-def _render_replacements(aged_df: pd.DataFrame, reorder_file, tims_csv, ns_csv) -> None:
+def _render_replacements(aged_df: pd.DataFrame, reorder_file, tims_usage_file, ns_file) -> None:
     with st.expander("🔁 Replacement parts for superseded stock"):
         st.caption("Finds the replacement each aged line's description or item notes point to (REF / TRY / "
                    "SUPERSEDED BY / REPLACED BY...), asks Claude only about the ones a pattern can't resolve, then "
                    "checks whether the replacement is selling - if it is, sell the old stock against its demand. "
                    "Needs_REF lists parts to REF over to the new part number in NetSuite.")
-        if reorder_file is None or tims_csv is None or ns_csv is None:
-            st.info("Needs the reorder report plus the TIMS and NetSuite sales history CSVs.")
+        if reorder_file is None or tims_usage_file is None or ns_file is None:
+            st.info("Needs the reorder report, the TIMS last usage file and the NetSuite sales history.")
             return
         if st.button("Find replacement parts", key="aged_repl_btn"):
             ss = st.session_state
+            read = lambda f: aged_stock.read_upload(f.getvalue(), f.name)
             _run("Finding replacements", "aged_ai_repl", lambda: find_replacements(
-                aged_df, _read_raw(reorder_file), pd.read_csv(tims_csv, dtype=str), pd.read_csv(ns_csv, dtype=str),
-                ss["aged_asat"], ss["aged_tl"], ss.get("aged_rv", 6)))
+                aged_df, _read_raw(reorder_file), read(tims_usage_file), read(ns_file),
+                ss["aged_asat"], ss.get("aged_rv", 6)))
         _show("aged_ai_repl", "superseded_replacements.csv")
 
 
-def render_aged_ai(aged_df: pd.DataFrame, reorder_file=None, tims_csv=None, ns_csv=None) -> None:
+def render_aged_ai(aged_df: pd.DataFrame, reorder_file=None, tims_usage_file=None, ns_file=None) -> None:
     """
-    AI tools for the Aged Stock tab. Every button is a deliberate, billed request.
+    AI tools for Aged Stock mode. Every button is a deliberate, billed request.
     reorder_file: the uploaded Part Reorder Rpt (for supplier / item-list lookups).
-    tims_csv / ns_csv: file-likes of the TIMS and NetSuite sales history CSVs.
+    tims_usage_file / ns_file: the uploaded TIMS last usage file and NetSuite sales history.
     """
     st.divider()
     st.markdown("### 🤖 AI Tools")
     _render_promo_copy(aged_df)
     _render_triage(aged_df, reorder_file)
-    _render_replacements(aged_df, reorder_file, tims_csv, ns_csv)
+    _render_replacements(aged_df, reorder_file, tims_usage_file, ns_file)
     render_ai_insights(
         aged_df,
         key_prefix="aged_",

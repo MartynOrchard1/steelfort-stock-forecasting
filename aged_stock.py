@@ -1,10 +1,11 @@
 """Aged stock analysis for location 10 (spare parts).
 
-Combines NetSuite last-sale dates with TIMS monthly movement history to work out
-how long each on-hand part has gone without moving, then buckets it:
+Works out how long each on-hand part has gone since it last sold or was received - TIMS
+history (last sale / last receipt per part, back to 2015) plus NetSuite since go-live -
+then buckets it:
     Active (<6 mths) / Review (6-12, portal special or flyer) / Clearance (12+)
 
-Use inside the app:           import aged_stock; aged_stock.render(reorder_df)
+Use inside the app:           Aged Stock mode (ui/aged_stock_view.py)
 Or standalone:                streamlit run aged_stock.py
 """
 import io
@@ -15,7 +16,6 @@ import numpy as np
 import pandas as pd
 
 LOC = "10"
-TIMS_COLS = [f"ith_{i:02d}" for i in range(1, 25)]  # ith_24 = most recent month
 SUPERSEDED = re.compile(r"^REF |NO LONGER AVAILABLE|\bTRY\b|SUPERSEDED", re.I)
 
 
@@ -40,16 +40,27 @@ def _cost_col(df):
     return None
 
 
-def tims_last_move(tims, latest_month):
-    """Month-end date of the last month with positive movement (ith_24 = latest_month)."""
-    tims = tims[tims["ith_loc"].astype(str).str.strip() == LOC]
-    moved = tims[TIMS_COLS[::-1]].apply(pd.to_numeric, errors="coerce").fillna(0).gt(0).to_numpy()
-    back = moved.argmax(axis=1)  # months back from latest
-    base = pd.Period(latest_month, "M")
-    # 24 month-ends worked out once and looked up, not per row (~2s on 47k rows)
-    month_ends = pd.DatetimeIndex([(base - i).end_time.normalize() for i in range(len(TIMS_COLS))])
-    dates = pd.Series(month_ends[back], index=tims["ith_part"].astype(str).str.strip(), name="Last_Move_TIMS")
-    return dates.where(moved.any(axis=1))
+# TIMS last-usage export columns (matched with _key) -> output column. Only sales and receipts
+# age stock; transfers (direction unknown) and stock adjustments (stocktakes) are shown for context.
+TIMS_DATES = {"lastsale": "Last_Sale_TIMS", "lastrec": "Last_Receipt_TIMS",
+              "lasttrf": "Last_Transfer", "lastadj": "Last_Adjustment"}
+
+
+def tims_last_usage(df):
+    """
+    The TIMS last-usage export (one row per part: Last_Sale, Last_Rec, Last_Trf, Last_Adj) at
+    location 10, as dates indexed by part. TIMS covers everything up to the NetSuite go-live.
+    """
+    cols = {_key(c): c for c in df.columns}
+    part = next((cols[c] for c in PART_COLS if c in cols), None)
+    if part is None or "lastsale" not in cols:
+        raise ValueError(f"TIMS last usage file needs a part number and a Last_Sale column - found: {list(df.columns)}")
+    loc = next((c for c in df.columns if "location" in _key(c) or _key(c) in LOC_COLS), None)
+    if loc is not None:
+        df = df[df[loc].astype(str).str.strip().str.match(LOC + r"\b")]
+    out = pd.DataFrame({name: _dates(df[cols[k]]).values for k, name in TIMS_DATES.items() if k in cols},
+                       index=df[part].astype(str).str.strip())
+    return out[~out.index.duplicated()]
 
 
 def ns_last_sale(ns):
@@ -89,10 +100,13 @@ def last_receipts(frames):
     return pd.concat(found).dropna().groupby(level=0).max() if found else None
 
 
-def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12, receipts=None):
-    """receipts: optional Series of part -> last receipt date at loc 10 (see last_receipts). Stock
-    received after it last moved is aged from the receipt, so new stock isn't counted as dead."""
-    inv =reorder[reorder["Inventory Location"].astype(str).str.startswith(LOC + " ")]
+def compute(reorder, ns, tims_usage, as_at, review_m=6, clear_m=12, receipts=None):
+    """
+    tims_usage: tims_last_usage() output. receipts: optional Series of part -> last receipt date at
+    loc 10 from NetSuite receipt exports (last_receipts). Age = months since the later of the last
+    sale and the last receipt, so stock received recently but not sold yet isn't counted as dead.
+    """
+    inv = reorder[reorder["Inventory Location"].astype(str).str.startswith(LOC + " ")]
     inv = inv.drop_duplicates("Part_Number").copy()  # one row per supplier in the export
     inv["Part_Number"] = inv["Part_Number"].astype(str).str.strip()
     inv["Qty_On_Hand"] = _num(inv["Location On Hand"])
@@ -109,34 +123,31 @@ def compute(reorder, tims, ns, as_at, tims_latest_month, review_m=6, clear_m=12,
     out["Unit_Cost"] = _num(inv[cost]) if cost else float("nan")
     out["Stock_Value"] = out["Qty_On_Hand"] * out["Unit_Cost"]
 
-    t = tims_last_move(tims, tims_latest_month)
-    out["In_TIMS"] = out["Part_Number"].isin(t.index)
-    out["Last_Move_TIMS"] = out["Part_Number"].map(t)
+    nat = pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]")
+    for name in TIMS_DATES.values():
+        out[name] = out["Part_Number"].map(tims_usage[name]) if name in tims_usage else nat
     out["Last_Sale_NS"] = out["Part_Number"].map(ns_last_sale(ns))
-    out["Last_Move"] = out[["Last_Sale_NS", "Last_Move_TIMS"]].max(axis=1)
+    out["Last_Receipt_NS"] = out["Part_Number"].map(receipts) if receipts is not None else nat
+    out["Last_Sale"] = out[["Last_Sale_TIMS", "Last_Sale_NS"]].max(axis=1)
+    out["Last_Receipt"] = out[["Last_Receipt_TIMS", "Last_Receipt_NS"]].max(axis=1)
 
     as_at = pd.Timestamp(as_at)
-    tims_start = (pd.Period(tims_latest_month, "M") - 23).start_time
-    no_move = out["Last_Move"].isna()
-    # No movement anywhere: age is at least the start of TIMS history (a lower bound).
-    out["Months_Since_Move"] = ((as_at - out["Last_Move"].fillna(tims_start)).dt.days / 30.4375).round(1)
+    months = lambda d: ((as_at - d).dt.days / 30.4375).round(1)
+    out["Months_Since_Sale"] = months(out["Last_Sale"])  # blank if it has never sold
+    last = out[["Last_Sale", "Last_Receipt"]].max(axis=1)
+    never = last.isna()
+    # TIMS records start at the earliest date in the export (2015): with no sale or receipt since
+    # then the stock is at least that old.
+    records_start = tims_usage.min().min()
+    out["Age_Months"] = months(last.fillna(records_start))
 
-    out["Last_Receipt"] = (out["Part_Number"].map(receipts) if receipts is not None
-                           else pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]"))
-    # With no movement in the TIMS window we only know it last moved before tims_start, so a receipt
-    # older than that (e.g. 2016) can't make it older than the window - it could have sold in 2020.
-    last_move_bound = out["Last_Move"].fillna(tims_start)
-    received_later = out["Last_Receipt"] > last_move_bound
-    # Bucket age: months since the later of last movement and last receipt.
-    last_in_or_out = pd.concat([last_move_bound, out["Last_Receipt"]], axis=1).max(axis=1)
-    out["Age_Months"] = ((as_at - last_in_or_out).dt.days / 30.4375).round(1)
-
-    out["Age_Basis"] = "TIMS movement (may include transfers)"
-    out.loc[out["Last_Sale_NS"].notna(), "Age_Basis"] = "NetSuite sale"
-    out.loc[no_move, "Age_Basis"] = "No movement in TIMS 24 mths or NetSuite (age is a minimum)"
-    out.loc[no_move & ~out["In_TIMS"], "Age_Basis"] = "Not in TIMS, no NetSuite sale (new item?)"
-    out.loc[received_later, "Age_Basis"] = "Received after it last moved (age from receipt)"
-    unknown = no_move & ~out["In_TIMS"] & out["Last_Receipt"].isna()
+    out["Age_Basis"] = "Last sale"
+    received_later = out["Last_Receipt"].notna() & ~(out["Last_Receipt"] <= out["Last_Sale"])
+    out.loc[received_later, "Age_Basis"] = "Received after last sale, or never sold (age from receipt)"
+    out.loc[never, "Age_Basis"] = (f"No sale or receipt since TIMS records began ({records_start:%Y}) - age is a minimum"
+                                   if pd.notna(records_start) else "No sale or receipt on record")
+    unknown = never & ~out["Part_Number"].isin(tims_usage.index)
+    out.loc[unknown, "Age_Basis"] = "Not in TIMS, no NetSuite sale or receipt (new item?)"
 
     m = out["Age_Months"]
     out["Bucket"] = "Active"
@@ -199,7 +210,7 @@ def summary(df):
 
 def portal_list(df, top_n, disc_review, disc_clear, has_cost):
     p = df[df["Bucket"].isin(["Review", "Clearance"]) & ~df["Conflict"] & (df["Qty_Available"] > 0)]
-    p = p.head(top_n)[["Part_Number", "Description", "Qty_Available", "Bucket", "Months_Since_Move", "Unit_Cost"]].copy()
+    p = p.head(top_n)[["Part_Number", "Description", "Qty_Available", "Bucket", "Age_Months", "Unit_Cost"]].copy()
     p["Suggested_Discount_%"] = p["Bucket"].map({"Review": disc_review, "Clearance": disc_clear})
     return p if has_cost else p.drop(columns="Unit_Cost")
 
@@ -218,65 +229,58 @@ def to_excel(df, portal, has_cost):
     return buf.getvalue()
 
 
-def _read_upload(u):
-    """(bytes, file name) of an upload -> DataFrame of strings; a DataFrame passes straight through."""
-    if isinstance(u, pd.DataFrame):
-        return u
-    data, name = u
+def read_upload(data: bytes, name: str) -> pd.DataFrame:
+    """An uploaded CSV / Excel file's bytes -> DataFrame of strings."""
     buf = io.BytesIO(data)
     return pd.read_csv(buf, dtype=str) if name.lower().endswith(".csv") else pd.read_excel(buf, dtype=str)
 
 
-def _aged(reorder, tims, ns, receipts, as_at, tims_latest_month, review_m, clear_m):
+def _aged(reorder, ns, usage, receipts, as_at, review_m, clear_m):
     """
-    Uploads -> compute(), cached as one step in render(): a click then costs a hash of the uploaded
-    bytes instead of re-reading every file (the TIMS receipts .xlsx alone is ~2s) and re-hashing frames.
+    Uploads as (bytes, file name) -> compute(), cached as one step in render(): a click then costs a hash
+    of the uploaded bytes instead of re-reading every file (an .xlsx alone is ~2s) and re-hashing frames.
     """
-    rec = last_receipts([_read_upload(u) for u in receipts]) if receipts else None
-    df, has_cost = compute(_read_upload(reorder), _read_upload(tims), _read_upload(ns),
-                           as_at, tims_latest_month, review_m, clear_m, rec)
+    rec = last_receipts([read_upload(*u) for u in receipts]) if receipts else None
+    df, has_cost = compute(read_upload(*reorder), read_upload(*ns), tims_last_usage(read_upload(*usage)),
+                           as_at, review_m, clear_m, rec)
     return df, has_cost, rec
 
 
-def render(reorder=None, tims_file=None, ns_file=None):
-    """tims_file / ns_file: CSV file-likes already uploaded elsewhere in the app (skips our uploaders)."""
+def render():
     import streamlit as st
 
     st.subheader("Aged Stock - Location 10")
-    with st.expander("Files and settings", expanded=reorder is None):
-        if reorder is None:
-            reorder = st.file_uploader("NetSuite Part Reorder Rpt (CSV)", type="csv", key="aged_reorder")
-        ft = tims_file or st.file_uploader("TIMS movement history (Dataset for forecasting 10)", type="csv", key="aged_tims")
-        fn = ns_file or st.file_uploader("NetSuite sales history", type="csv", key="aged_ns")
-        fr = st.file_uploader("Last receipt dates (optional, one or more files - e.g. NetSuite item receipts and "
-                              "the TIMS last-receipt export; needs a part number and a date column)",
+    with st.expander("Files and settings", expanded=True):
+        reorder = st.file_uploader("NetSuite Part Reorder Rpt (CSV)", type="csv", key="aged_reorder")
+        fn = st.file_uploader("NetSuite sales history", type="csv", key="aged_ns")
+        fu = st.file_uploader("TIMS last usage (last sale / receipt / transfer / adjustment per part)",
+                              type=["csv", "xlsx", "xls"], key="aged_tims_usage")
+        fr = st.file_uploader("NetSuite last receipt dates (optional, one or more files - e.g. the Item Last "
+                              "Receipted Date saved search; needs a part number and a date column)",
                               type=["csv", "xlsx", "xls"], accept_multiple_files=True, key="aged_receipts")
         c1, c2, c3 = st.columns(3)
         as_at = c1.date_input("As-at date", date.today(), key="aged_asat")
-        tims_latest = c2.date_input("TIMS latest month (ith_24)", date(2026, 7, 1), key="aged_tl",
-                                    help="Last full month before NetSuite go-live.")
         review_m = c3.number_input("Review at (months)", 1, 60, 6, key="aged_rv")
         clear_m = c3.number_input("Clearance at (months)", 1, 120, 12, key="aged_cl")
         top_n = c1.number_input("Portal list: top lines", 5, 500, 30, key="aged_top")
         disc_r = c2.number_input("Review discount %", 0, 90, 15, key="aged_dr")
         disc_c = c2.number_input("Clearance discount %", 0, 90, 30, key="aged_dc")
 
-    if reorder is None or ft is None or fn is None:
-        st.info("Upload the reorder report, TIMS history and NetSuite sales history to run.")
+    if reorder is None or fn is None or fu is None:
+        st.info("Upload the reorder report, NetSuite sales history and TIMS last usage file to run.")
         st.session_state.pop("aged_df", None)  # don't leave a stale override in Spare Parts Ordering
         st.session_state.pop("aged_view", None)
         return
 
-    up = lambda f: f if isinstance(f, pd.DataFrame) else (f.getvalue(), getattr(f, "name", "upload.csv"))
+    up = lambda f: (f.getvalue(), f.name)
     df, has_cost, receipts = st.cache_data(show_spinner="Ageing stock...")(_aged)(
-        up(reorder), up(ft), up(fn), tuple(up(f) for f in fr or ()), as_at, tims_latest, review_m, clear_m)
+        up(reorder), up(fn), up(fu), tuple(up(f) for f in fr or ()), as_at, review_m, clear_m)
     st.session_state["aged_df"] = df  # read by Spare Parts Ordering for the DO NOT ORDER override
     if receipts is None:
-        st.warning("No receipt dates loaded - stock received recently that hasn't sold yet is counted as aged, "
-                   "so Review / Clearance are overstated. Add receipt exports under Files and settings.")
+        st.warning("No NetSuite receipt dates loaded - stock received since go-live that hasn't sold yet is "
+                   "counted as aged. Add the receipts export under Files and settings.")
     else:
-        st.caption(f"Receipt dates loaded for {len(receipts):,} parts (latest {receipts.max():%d/%m/%Y}); "
-                   f"{df['Age_Basis'].str.startswith('Received').sum():,} on-hand lines aged from their receipt.")
+        st.caption(f"NetSuite receipt dates loaded for {len(receipts):,} parts (latest {receipts.max():%d/%m/%Y}).")
     if not has_cost:
         st.warning("No cost column found (e.g. 'Average Cost') - showing quantities only, sorted by qty. "
                    "Add Average Cost to the Part Reorder Rpt saved search to get stock values.")

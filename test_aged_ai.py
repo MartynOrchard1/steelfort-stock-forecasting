@@ -41,7 +41,7 @@ assert list(promo["Promo_Title"]) == ["title!", "title!"] and len(promo) == 2, p
 aged = pd.DataFrame({
     "Part_Number": [f"P{i}" for i in range(120)] + ["ACTIVE"],
     "Description": "X", "Part Group": "G", "Qty_On_Hand": 1.0, "Unit_Cost": 2.0,
-    "Stock_Value": [float(i) for i in range(120)] + [999.0], "Months_Since_Move": 13.0, "Flags": "",
+    "Stock_Value": [float(i) for i in range(120)] + [999.0], "Age_Months": 13.0, "Last_Sale": pd.Timestamp("2025-08-01"), "Flags": "",
     "Bucket": ["Clearance"] * 120 + ["Active"],
 })
 reorder = pd.DataFrame({"Part_Number": ["P119 ", "P119"], "Supplier": ["SUP1", "SUP2"]})  # dup supplier rows
@@ -63,7 +63,7 @@ notes = {"NOTE1": "Replaced by 503P01033", "NOTE2": "SUPERSEDES 605380 AND 60720
          "NOTE5": "OV(291) | ** ONCE SOLD REF:PM8136800 **"}
 aged = pd.DataFrame({"Part_Number": list(desc), "Description": list(desc.values()),
                      "Bucket": ["Clearance"] * 12 + ["Active"], "Qty_On_Hand": 1.0, "Stock_Value": 1.0,
-                     "Months_Since_Move": 13.0, "Flags": [""] * 4 + ["Possibly superseded"] + [""] * 8})
+                     "Age_Months": 13.0, "Flags": [""] * 4 + ["Possibly superseded"] + [""] * 8})
 lines = ai.superseded_lines(aged, known, notes).set_index("Part_Number")
 assert list(lines.index) == ["OLD1", "OLD2", "OLD3", "OLD4", "OLD5", "OLD7", "NOTE1", "NOTE2", "NOTE3", "NOTE4", "NOTE5"]
 assert lines.at["OLD1", "Replacement"] == "PPBB043" and lines.at["OLD2", "Replacement"] == "618P09970"  # desc beats notes
@@ -81,7 +81,7 @@ last_move = pd.Series(pd.to_datetime(["2026-09-01", "2025-01-31"]), index=["PPBB
 out = ai.replacement_status(resolved, aged, last_move, "2026-10-07").set_index("Part_Number")
 status = out["Replacement_Status"]
 assert status["OLD1"].startswith("Replacement is selling") and status["OLD2"].startswith("Replacement is slow")
-assert status["OLD7"] == "Replacement has no recorded movement" and status["OLD5"] == "No replacement found"
+assert status["OLD7"] == "Replacement has no recorded sale" and status["OLD5"] == "No replacement found"
 # Only lines whose description doesn't already say REF need fixing in NetSuite.
 assert out.at["NOTE1", "Needs_REF"] == "REF to MT503P01033" and out.at["OLD2", "Needs_REF"] == "REF to 618P09970"
 assert out.at["OLD1", "Needs_REF"] == "" and out.at["OLD5", "Needs_REF"] == ""
