@@ -62,3 +62,23 @@ def get_forecast_month_columns_newest_first(columns) -> list[str]:
     """
     month_cols = [c for c in columns if re.fullmatch(r"ith_\d{2}", str(c))]
     return sorted(month_cols, key=lambda x: int(str(x).split("_")[1]), reverse=True)
+
+
+# Excel runs text starting with these as a formula (and openpyxl writes such text to .xlsx as a
+# real formula). Export text comes from NetSuite fields anyone can edit, and from Claude.
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def spreadsheet_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """Copy of df with text cells that would start a formula prefixed by an apostrophe."""
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == object or isinstance(out[col].dtype, pd.StringDtype):
+            risky = out[col].map(lambda v: isinstance(v, str) and v.startswith(FORMULA_START))
+            out.loc[risky, col] = "'" + out.loc[risky, col]
+    return out
+
+
+def csv_for_download(df: pd.DataFrame):
+    """st.download_button data: built only when clicked (not on every rerun), formula-safe."""
+    return lambda: spreadsheet_safe(df).to_csv(index=False).encode("utf-8")

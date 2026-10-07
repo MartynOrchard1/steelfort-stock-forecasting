@@ -1,6 +1,7 @@
 import streamlit as st
 
 from config import APP_TITLE, APP_CAPTION, APP_MODES
+from ui.aged_stock_view import render_aged_stock_mode
 from ui.auth import require_login, render_logout_button
 from ui.bunnings_view import render_bunnings_mode
 from ui.inventory_view import render_inventory_mode
@@ -33,6 +34,8 @@ def main() -> None:
 
     if mode == "Bunnings":
         render_bunnings_mode()
+    elif mode == "Aged Stock":
+        render_aged_stock_mode()
     elif mode == "Units Ordering":
         render_units_mode()
     elif mode == "POC Check":

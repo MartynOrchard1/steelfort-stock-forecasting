@@ -355,7 +355,8 @@ def apply_inventory_filters(
         filtered = filtered[~filtered["Is NLA?"]]
 
     if only_need_order:
-        filtered = filtered[filtered["Recommended Order"] > 0]
+        # Base, not Recommended: keeps aged-stock DO NOT ORDER rows visible
+        filtered = filtered[filtered["Base Recommended Order"] > 0]
 
     if text_search:
         q = text_search.strip().lower()

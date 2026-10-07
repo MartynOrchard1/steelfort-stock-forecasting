@@ -6,7 +6,7 @@ from services.bunnings_service import (
     clean_bunnings_file_cached,
     load_bunnings_forecast_by_loc_cached,
 )
-from utils.helpers import get_uploaded_file_bytes
+from utils.helpers import get_uploaded_file_bytes, csv_for_download
 
 
 def render_bunnings_mode() -> None:
@@ -122,7 +122,7 @@ def render_bunnings_mode() -> None:
 
     st.dataframe(filtered[display_columns], width="stretch", hide_index=True)
 
-    export_csv = filtered.to_csv(index=False).encode("utf-8")
+    export_csv = csv_for_download(filtered)
     st.download_button(
         "⬇️ Download Bunnings WOH CSV",
         data=export_csv,

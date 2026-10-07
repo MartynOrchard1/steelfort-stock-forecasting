@@ -1,4 +1,7 @@
 import pandas as pd
+import streamlit as st
+
+from services.inventory_service import clean_inventory_data_cached
 
 
 def classify_spring_product_line(df: pd.DataFrame) -> pd.DataFrame:
@@ -32,3 +35,13 @@ def classify_spring_product_line(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[(df["Spring Category"] != "Resources / POX") & desc.str.contains("ROPE|STARTER|HANDLE", regex=True, na=False), "Spring Category"] = "Starter Rope / Handles"
 
     return df
+
+
+@st.cache_data(show_spinner=False)
+def load_inventory_with_spring_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+    """
+    clean_inventory_data_cached + classify_spring_product_line as one cached
+    step. The classifier's text searches over every row took ~0.6s of each
+    click in Spare Parts Ordering when it ran outside the cache.
+    """
+    return classify_spring_product_line(clean_inventory_data_cached(file_bytes, file_name))
