@@ -86,4 +86,8 @@ assert status["OLD7"] == "Replacement has no recorded movement" and status["OLD5
 assert out.at["NOTE1", "Needs_REF"] == "REF to MT503P01033" and out.at["OLD2", "Needs_REF"] == "REF to 618P09970"
 assert out.at["OLD1", "Needs_REF"] == "" and out.at["OLD5", "Needs_REF"] == ""
 
+# AI replies are rendered as markdown: no remote images or link URLs survive.
+from services.ai_insights import strip_remote_content
+assert strip_remote_content("Top ![x](https://evil.example/p.png?d=1) [doc](https://evil.example) **bold**") == "Top x doc **bold**"
+
 print("ok")

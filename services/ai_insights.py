@@ -6,6 +6,8 @@ aggregates the important bits first (counts, worst offenders, supplier and
 category rollups) and only sends that.
 """
 
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -115,6 +117,16 @@ off. If there's more worth flagging than fits, say so explicitly (e.g. "there ar
 issues - ask if you want the full list") rather than trying to cram everything in."""
 
 
+def strip_remote_content(text: str) -> str:
+    """
+    Replies are rendered as markdown, and the data summary includes item text anyone can edit in
+    NetSuite - a planted instruction could get Claude to emit an image whose URL carries data, which
+    the browser would fetch on display. Drop images; keep link text but not the URL.
+    """
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    return re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+
+
 def get_client():
     api_key = st.secrets.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -170,7 +182,7 @@ def ask_ai(
             system=system_prompt,
             messages=messages,
         )
-        text = "".join(block.text for block in response.content if hasattr(block, "text"))
+        text = strip_remote_content("".join(block.text for block in response.content if hasattr(block, "text")))
         if response.stop_reason == "max_tokens":
             text += "\n\n*(Cut off - hit the response length limit. Ask a narrower question, e.g. about one supplier or category, for a complete answer.)*"
         return text
