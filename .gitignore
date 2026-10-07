@@ -15,3 +15,4 @@ Steelfort_Reorder_List.xlsx
 # Login password - never commit the real secrets file. secrets.toml.example
 # is fine to commit since it only has a placeholder.
 .streamlit/secrets.toml
+__pycache__/config.cpython-313.pyc
