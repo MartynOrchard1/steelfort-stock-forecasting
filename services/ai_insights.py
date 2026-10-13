@@ -127,6 +127,65 @@ def strip_remote_content(text: str) -> str:
     return re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
 
 
+TOOL_SYSTEM_PROMPT = """You are a purchasing/inventory assistant for Steelfort (spare parts purchasing). You have \
+tools over the FULL loaded dataset (not a snapshot): find_parts, get_part_detail, order_timing, summarise.
+
+Rules:
+- For ANY question about specific parts, products, suppliers or categories, call tools BEFORE answering. Never say \
+you can't see something without having searched with find_parts first.
+- Pasted part lists are pre-matched for you (see "Pre-matched SKUs" in the message); still call order_timing for \
+timing questions. State clearly which SKUs matched and which were NOT FOUND. Forecast codes use a PV prefix \
+(PVHA27390A) where NetSuite does not (HA27390A) - matching already handles that.
+- "When should I order" = per part: latest order date and suggested qty from order_timing, fast sellers flagged. \
+Overdue = order now. Sort most urgent first.
+- If a tool reports a missing column or lead time, say exactly what is missing; never invent lead times or dates.
+- Answer the question asked, directly. Do not offer follow-up lookups you can do yourself with tools.
+- Priority: URGENT = real shortfall, REPLENISH = below reorder point, OK = fine. Be concise (under ~400 words), \
+plain language, a compact table or bullets."""
+
+MAX_TOOL_ROUNDS = 6
+
+
+def ask_ai_with_tools(df, conversation, user_message, lead_days=0, safety_days=7) -> str:
+    """Tool-calling chat over the full dataframe; only tool results (small, relevant rows) reach the model."""
+    import json
+
+    from services.ai_tools import TOOLS, extract_sku_tokens, find_parts, run_tool
+
+    client = get_client()
+    if client is None:
+        return ("No Anthropic API key configured. Add ANTHROPIC_API_KEY in Secrets to enable AI Insights.")
+
+    history = conversation[-MAX_HISTORY_TURNS:]
+    while history and history[0]["role"] != "user":
+        history = history[1:]
+    messages = [{"role": t["role"], "content": t["content"]} for t in history]
+
+    content = user_message
+    tokens = extract_sku_tokens(user_message)
+    if tokens:
+        res = find_parts(df, skus=tokens)
+        content += "\n\nPre-matched SKUs (auto-extracted from the message): " + json.dumps(res["sku_match"], default=str)
+    messages.append({"role": "user", "content": content})
+
+    try:
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = client.messages.create(
+                model=MODEL, max_tokens=4000, system=TOOL_SYSTEM_PROMPT, tools=TOOLS, messages=messages,
+            )
+            if response.stop_reason != "tool_use":
+                return strip_remote_content("".join(b.text for b in response.content if hasattr(b, "text")))
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": b.id,
+                 "content": json.dumps(run_tool(b.name, b.input, df, lead_days, safety_days), default=str)}
+                for b in response.content if b.type == "tool_use"
+            ]})
+        return "Stopped after too many tool calls - try a narrower question."
+    except Exception as e:
+        return f"AI request failed: {e}"
+
+
 def get_client():
     api_key = st.secrets.get("ANTHROPIC_API_KEY")
     if not api_key:

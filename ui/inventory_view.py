@@ -440,7 +440,7 @@ def render_inventory_mode() -> None:
     )
 
     st.divider()
-    render_ai_insights(filtered)
+    render_ai_insights(filtered, tools_df=df)
 
     with st.expander("Detected file structure"):
         st.write("Main Filter Column:", main_filter_col)

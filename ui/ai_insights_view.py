@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from services.ai_insights import SYSTEM_PROMPT, ask_ai, build_data_summary
+from services.ai_insights import SYSTEM_PROMPT, ask_ai, ask_ai_with_tools, build_data_summary
 
 SUMMARY_REQUEST = (
     "Give me a short summary of what needs attention today, then "
@@ -17,6 +17,7 @@ def render_ai_insights(
     summary_fn=build_data_summary,
     system_prompt: str = SYSTEM_PROMPT,
     summary_request: str = SUMMARY_REQUEST,
+    tools_df: pd.DataFrame | None = None,
 ) -> None:
     """
     AI Insights panel: an on-demand summary/anomaly button plus a small
@@ -65,6 +66,16 @@ def render_ai_insights(
         with st.chat_message(turn["role"]):
             st.write(turn["content"])
 
+    lead_days = safety_days = 0
+    if tools_df is not None:
+        # tools_df = the full (unfiltered) table; the chat searches it with tools instead of a snapshot
+        c1, c2 = st.columns(2)
+        lead_days = c1.number_input(
+            "Supplier lead time (days)", min_value=0, value=0, key=f"{key_prefix}ai_lead",
+            help="No lead-time column in the data. 0 = not set, so order dates can't be calculated.",
+        )
+        safety_days = c2.number_input("Safety buffer (days)", min_value=0, value=7, key=f"{key_prefix}ai_safety")
+
     user_question = st.chat_input(
         "Ask a question about the currently loaded data...",
         key=f"{key_prefix}ai_chat_input",
@@ -73,8 +84,12 @@ def render_ai_insights(
         with st.chat_message("user"):
             st.write(user_question)
         with st.spinner("Asking Claude..."):
-            summary = summary_fn(df)
-            answer = ask_ai(summary, st.session_state[history_key], user_question, system_prompt)
+            if tools_df is not None:
+                answer = ask_ai_with_tools(
+                    tools_df, st.session_state[history_key], user_question, lead_days, safety_days
+                )
+            else:
+                answer = ask_ai(summary_fn(df), st.session_state[history_key], user_question, system_prompt)
         st.session_state[history_key].append({"role": "user", "content": user_question})
         st.session_state[history_key].append({"role": "assistant", "content": answer})
         with st.chat_message("assistant"):
