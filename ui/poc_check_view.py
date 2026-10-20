@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from services.backorder_service import load_backorder_report_cached
 from services.forecast_service import (
     load_forecast_history_cached,
     merge_inventory_and_forecast,
@@ -429,6 +430,13 @@ def render_poc_check_mode() -> None:
         key="poc_netsuite_sales_file",
     )
 
+    poc_backorder_file = st.file_uploader(
+        "Upload NetSuite Custom Inventory Back Order Report (optional - same report as Spare "
+        "Parts Ordering; overrides any Back Ordered column in the POC export)",
+        type=["csv"],
+        key="poc_backorder_file",
+    )
+
     if not poc_inventory_file:
         st.info("Upload your NetSuite POC inventory export to get started.")
         return
@@ -457,6 +465,14 @@ def render_poc_check_mode() -> None:
     # separate grouped NetSuite report) - coerce it to numeric so both tabs
     # can force Urgent priority off it. Defaults to 0 for older exports
     # that don't have the column yet.
+    if poc_backorder_file is not None:
+        bo_bytes, bo_name = get_uploaded_file_bytes(poc_backorder_file)
+        with st.spinner("Loading back order report..."):
+            backorder_df = load_backorder_report_cached(bo_bytes, bo_name)
+        df = df.drop(columns=["Back Ordered"], errors="ignore").merge(
+            backorder_df[["Part_Number", "Back Ordered"]], on="Part_Number", how="left"
+        )
+
     df["Back Ordered"] = pd.to_numeric(df.get("Back Ordered", 0), errors="coerce").fillna(0)
     backordered_loaded = bool((df["Back Ordered"] > 0).any())
 
