@@ -10,6 +10,10 @@ from services.inventory_service import (
     apply_inventory_calculations,
     clean_inventory_data_cached,
 )
+from services.netsuite_sales_service import (
+    MIN_EXPECTED_SALES_HISTORY_DAYS,
+    load_netsuite_sales_history_cached,
+)
 from ui.ai_insights_view import render_ai_insights
 from ui.filters import apply_grouping_filters, render_grouping_filters
 from utils.helpers import get_forecast_month_columns_newest_first, get_uploaded_file_bytes, csv_for_download
@@ -21,6 +25,10 @@ from utils.helpers import get_forecast_month_columns_newest_first, get_uploaded_
 
 CATEGORY_MANUFACTURE = "🔧 Manufacture"
 CATEGORY_PURCHASE = "🛒 Purchase"
+
+NETSUITE_SALES_COLUMNS = [
+    "NetSuite Qty Sold", "NetSuite Revenue Sold", "NetSuite Last Sale Date", "NetSuite First Sale Date",
+]
 
 
 def _classify_category(df: pd.DataFrame) -> pd.DataFrame:
@@ -227,6 +235,7 @@ def _render_demand_forecast_tab(
         "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Part Type", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Available Now", "Net After POs",
         "Demand_Per_Month_Used", "Target Stock", "Recommended Order", "Back Ordered", "Priority V2",
+        *NETSUITE_SALES_COLUMNS,
     ]
     display_columns = [c for c in display_columns if c in filtered.columns]
     # Drop the base Reorder-Point-only "Priority" column (from
@@ -357,6 +366,7 @@ def _render_reorder_point_tab(df: pd.DataFrame, backordered_loaded: bool) -> Non
         "Part_Number", "Description", "Category", "POREF_SUPP", "Type", "Part Group", "Part Type", "Loc",
         "Qty on hand", "Qty Allocated", "Qty on Order", "Net After POs",
         "Min", "Max", "Recommended Order", "Back Ordered", "Priority Display",
+        *NETSUITE_SALES_COLUMNS,
     ]
     display_columns = [c for c in display_columns if c in filtered.columns]
     filtered_display = filtered[display_columns].rename(
@@ -412,6 +422,13 @@ def render_poc_check_mode() -> None:
         key="poc_forecast_file",
     )
 
+    poc_netsuite_sales_file = st.file_uploader(
+        "Upload NetSuite Sales History CSV (optional - same export as Spare Parts Ordering; "
+        "shown for reference alongside each POC part)",
+        type=["csv"],
+        key="poc_netsuite_sales_file",
+    )
+
     if not poc_inventory_file:
         st.info("Upload your NetSuite POC inventory export to get started.")
         return
@@ -456,6 +473,21 @@ def render_poc_check_mode() -> None:
         df["Forecast Matched?"] = df["Forecast_3m_Avg"].notna() if "Forecast_3m_Avg" in df.columns else False
         forecast_loaded = True
 
+    netsuite_sales_loaded = False
+    if poc_netsuite_sales_file is not None:
+        ns_bytes, ns_name = get_uploaded_file_bytes(poc_netsuite_sales_file)
+        with st.spinner("Loading NetSuite sales history..."):
+            _, ns_grouped, ns_span_days = load_netsuite_sales_history_cached(ns_bytes, ns_name)
+        if ns_span_days < MIN_EXPECTED_SALES_HISTORY_DAYS:
+            st.warning(
+                f"NetSuite Sales History only spans {ns_span_days} day(s) of transactions - "
+                "the saved search's Date filter likely isn't set to the last 24 months yet. "
+                "Treat the NetSuite sales columns as provisional."
+            )
+        if not ns_grouped.empty:
+            df = df.merge(ns_grouped, on="Part_Number", how="left")
+            netsuite_sales_loaded = True
+
     if not month_cols:
         month_cols = get_forecast_month_columns_newest_first(df.columns)
 
@@ -470,6 +502,7 @@ def render_poc_check_mode() -> None:
     with st.expander("Detected file structure"):
         st.write("POC Forecast File Loaded:", forecast_loaded)
         st.write("Back Ordered Column Found:", backordered_loaded)
+        st.write("NetSuite Sales History Loaded:", netsuite_sales_loaded)
         st.write("Total Rows In Upload:", total_rows)
         st.write("Non-POC Rows Excluded:", non_poc_rows)
         st.write("POC Rows Loaded:", len(df))
